@@ -1857,12 +1857,7 @@ class AbsTask(ABC):
             utt2category_file = str(utt2category_file)
             logging.warning("Reading " + utt2category_file)
         else:
-            print("DIDNT FINDDDDDDDDD")
-            print("PATHHHHH")
-            print(iter_options.data_path_and_name_and_type[0][0])
-            print("END PATHHHH")
             base_path = Path(iter_options.data_path_and_name_and_type[0][0]).parent
-            print("path", base_path)
             with open(base_path / "utt2spk") as f, open(base_path / "utt2category", "w") as out:
                 for line in f:
                     utt = line.split()[0]
