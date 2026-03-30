@@ -848,6 +848,7 @@ class Trainer:
         update_weights=False,
         beta_cer_mov_avg = 1.0,
     ) -> None:
+        print("BETA:",  beta_cer_mov_avg)
         ngpu = options.ngpu
         no_forward_run = options.no_forward_run
         distributed = distributed_option.distributed
