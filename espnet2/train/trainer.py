@@ -846,7 +846,7 @@ class Trainer:
         distributed_option: DistributedOption,
         output_dir = None,
         update_weights=False,
-        beta_cer_mov_avg = 0.1,
+        beta_cer_mov_avg = 1.0,
     ) -> None:
         ngpu = options.ngpu
         no_forward_run = options.no_forward_run
