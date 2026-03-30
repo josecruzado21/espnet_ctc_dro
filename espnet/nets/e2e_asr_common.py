@@ -130,7 +130,7 @@ class ErrorCalculator(object):
         else:
             self.idx_space = None
 
-    def __call__(self, ys_hat, ys_pad, is_ctc=False):
+    def __call__(self, ys_hat, ys_pad, is_ctc=False, return_lists=False):
         """Calculate sentence-level WER/CER score.
 
         :param torch.Tensor ys_hat: prediction (batch, seqlen)
@@ -143,7 +143,7 @@ class ErrorCalculator(object):
         """
         cer, wer = None, None
         if is_ctc:
-            return self.calculate_cer_ctc(ys_hat, ys_pad)
+            return self.calculate_cer_ctc(ys_hat, ys_pad, return_lists)
         elif not self.report_cer and not self.report_wer:
             return cer, wer
 
@@ -155,38 +155,55 @@ class ErrorCalculator(object):
             wer = self.calculate_wer(seqs_hat, seqs_true)
         return cer, wer
 
-    def calculate_cer_ctc(self, ys_hat, ys_pad):
+    def calculate_cer_ctc(self, ys_hat, ys_pad, return_lists=False):
         """Calculate sentence-level CER score for CTC.
 
         :param torch.Tensor ys_hat: prediction (batch, seqlen)
         :param torch.Tensor ys_pad: reference (batch, seqlen)
+        :param bool return_lists: whether to return edit distances and reference lengths
         :return: average sentence-level CER score
         :rtype float
         """
         import editdistance
-
         cers, char_ref_lens = [], []
         for i, y in enumerate(ys_hat):
             y_hat = [x[0] for x in groupby(y)]
             y_true = ys_pad[i]
             seq_hat, seq_true = [], []
-            for idx in y_hat:
+            # [1:] to remove the language
+            for idx in y_hat[1:]:
                 idx = int(idx)
-                if idx != -1 and idx != self.idx_blank and idx != self.idx_space:
-                    seq_hat.append(self.char_list[int(idx)])
+                if idx != -1 and idx != self.idx_blank:
+                    if idx == self.idx_space:
+                        seq_hat.append(" ")
+                    else:
+                        seq_hat.append(self.char_list[int(idx)])
 
-            for idx in y_true:
+            for idx in y_true[1:]:
                 idx = int(idx)
-                if idx != -1 and idx != self.idx_blank and idx != self.idx_space:
-                    seq_true.append(self.char_list[int(idx)])
+                if idx != -1 and idx != self.idx_blank:
+                    if idx == self.idx_space:
+                        seq_true.append(" ")
+                    else:
+                        seq_true.append(self.char_list[int(idx)])
 
             hyp_chars = "".join(seq_hat)
             ref_chars = "".join(seq_true)
+            print("hypchars:")
+            print(hyp_chars)
+            print("refchars:")
+            print(ref_chars)
+            print()
             if len(ref_chars) > 0:
                 cers.append(editdistance.eval(hyp_chars, ref_chars))
                 char_ref_lens.append(len(ref_chars))
-
-        cer_ctc = float(sum(cers)) / sum(char_ref_lens) if cers else None
+        if return_lists:
+            cer_ctc = {}
+            cer_ctc["edit_distances"] = cers
+            cer_ctc["ref_lengths"] = char_ref_lens
+            cer_ctc["cer_ctc"] = float(sum(cers)) / sum(char_ref_lens) if cers else None
+        else:
+            cer_ctc = float(sum(cers)) / sum(char_ref_lens) if cers else None
         return cer_ctc
 
     def convert_to_char(self, ys_hat, ys_pad):

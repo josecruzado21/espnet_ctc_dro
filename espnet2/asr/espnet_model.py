@@ -238,6 +238,10 @@ class ESPnetASRModel(AbsESPnetModel):
             text_lengths: (Batch,)
             kwargs: "utt_id" is among the input.
         """
+        utt_id = kwargs.get("utt_id", None)
+        return_lists = kwargs.get("return_lists", False)
+        groups = kwargs.get("groups", None)
+        group_dro_weights = kwargs.get("group_dro_weights", None)
         assert text_lengths.dim() == 1, text_lengths.shape
         # Check that batch_size is unified
         assert (
@@ -268,13 +272,27 @@ class ESPnetASRModel(AbsESPnetModel):
 
         # 1. CTC branch
         if self.ctc_weight != 0.0:
+            valid = kwargs.get("valid", None)
             loss_ctc, cer_ctc = self._calc_ctc_loss(
-                encoder_out, encoder_out_lens, text, text_lengths
+                encoder_out, encoder_out_lens, text, text_lengths, return_lists, groups, group_dro_weights, valid
             )
 
             # Collect CTC branch stats
             stats["loss_ctc"] = loss_ctc.detach() if loss_ctc is not None else None
-            stats["cer_ctc"] = cer_ctc
+            if isinstance(cer_ctc, dict):
+                stats["cer_ctc"] = cer_ctc["cer_ctc"]
+                stats["edit_distances"] = cer_ctc["edit_distances"]
+                stats["ref_lengths"] = cer_ctc["ref_lengths"]
+                print(text)
+                for index in range(text.shape[0]):
+                    print("Uttid:")
+                    print(utt_id[index])
+                    print("CER:")
+                    print("Distances:", cer_ctc["edit_distances"][index]) 
+                    print("Length:", cer_ctc["ref_lengths"][index])
+                    print()
+                print("END OF BATCH\n")
+                print("-"*50)
 
         # Intermediate CTC (optional)
         loss_interctc = 0.0
@@ -612,15 +630,19 @@ class ESPnetASRModel(AbsESPnetModel):
         encoder_out_lens: torch.Tensor,
         ys_pad: torch.Tensor,
         ys_pad_lens: torch.Tensor,
+        return_lists = False,
+        groups=None, 
+        groups_weights=None,
+        valid = False
     ):
         # Calc CTC loss
-        loss_ctc = self.ctc(encoder_out, encoder_out_lens, ys_pad, ys_pad_lens)
-
+        loss_ctc = self.ctc(encoder_out, encoder_out_lens, ys_pad, ys_pad_lens, 
+                            groups=groups, groups_weights=groups_weights, valid=valid)
         # Calc CER using CTC
         cer_ctc = None
         if not self.training and self.error_calculator is not None:
             ys_hat = self.ctc.argmax(encoder_out).data
-            cer_ctc = self.error_calculator(ys_hat.cpu(), ys_pad.cpu(), is_ctc=True)
+            cer_ctc = self.error_calculator(ys_hat.cpu(), ys_pad.cpu(), is_ctc=True,return_lists=return_lists)
         return loss_ctc, cer_ctc
 
     def _calc_transducer_loss(

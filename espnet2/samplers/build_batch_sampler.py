@@ -170,6 +170,7 @@ def build_batch_sampler(
             sort_in_batch=sort_in_batch,
             sort_batch=sort_batch,
             drop_last=drop_last,
+            utt2category_file = utt2category_file,
         )
 
     elif type == "folded":

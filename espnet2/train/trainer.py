@@ -16,6 +16,7 @@ import torch.nn
 import torch.optim
 from packaging.version import parse as V
 from typeguard import typechecked
+import math
 
 from espnet2.iterators.abs_iter_factory import AbsIterFactory
 from espnet2.main_funcs.average_nbest_models import average_nbest_models
@@ -154,7 +155,7 @@ class Trainer:
         schedulers: Sequence[Optional[AbsScheduler]],
         scaler: Optional[GradScaler],
         ngpu: int = 0,
-        strict: bool = True,
+        strict: bool = True
     ):
         states = torch.load(
             checkpoint,
@@ -188,12 +189,12 @@ class Trainer:
         plot_attention_iter_factory: Optional[AbsIterFactory],
         trainer_options,
         distributed_option: DistributedOption,
+        warmup_epochs = 5,
     ) -> None:
         """Perform training. This method performs the main process of training."""
         # NOTE(kamo): Don't check the type more strictly as far trainer_options
         assert is_dataclass(trainer_options), type(trainer_options)
         assert len(optimizers) == len(schedulers), (len(optimizers), len(schedulers))
-
         if isinstance(trainer_options.keep_nbest_models, int):
             keep_nbest_models = [trainer_options.keep_nbest_models]
         else:
@@ -203,6 +204,11 @@ class Trainer:
             keep_nbest_models = trainer_options.keep_nbest_models
 
         output_dir = Path(trainer_options.output_dir)
+
+        train_groups = train_iter_factory.groups
+        group_dro_weights = {k: 1/len(train_groups) for k in train_groups}
+        torch.save(group_dro_weights, output_dir / "group_dro_weights.pth")
+
         reporter = Reporter()
         if trainer_options.use_amp:
             if V(torch.__version__) < V("1.6.0"):
@@ -232,6 +238,7 @@ class Trainer:
                 raise RuntimeError("Requiring S3PRL. ")
 
         if trainer_options.resume and (output_dir / "checkpoint.pth").exists():
+            group_dro_weights = torch.load(output_dir / "group_dro_weights.pth")
             cls.resume(
                 checkpoint=output_dir / "checkpoint.pth",
                 model=model,
@@ -240,7 +247,7 @@ class Trainer:
                 reporter=reporter,
                 scaler=scaler,
                 ngpu=trainer_options.ngpu,
-                strict=not use_adapter,
+                strict=not use_adapter
             )
 
         start_epoch = reporter.get_epoch() + 1
@@ -320,6 +327,7 @@ class Trainer:
 
         start_time = time.perf_counter()
         for iepoch in range(start_epoch, trainer_options.max_epoch + 1):
+            update_weights = (iepoch >= warmup_epochs)
             if iepoch != start_epoch:
                 logging.info(
                     "{}/{}epoch started. Estimated time to finish: {}".format(
@@ -349,7 +357,8 @@ class Trainer:
                     scaler=scaler,
                     summary_writer=train_summary_writer,
                     options=trainer_options,
-                    distributed_option=distributed_option,
+                    distributed_option=distributed_option,    
+                    output_dir = output_dir     
                 )
 
             torch.cuda.empty_cache()
@@ -360,6 +369,8 @@ class Trainer:
                     reporter=sub_reporter,
                     options=trainer_options,
                     distributed_option=distributed_option,
+                    output_dir = output_dir,
+                    update_weights = update_weights
                 )
 
             torch.cuda.empty_cache()
@@ -557,8 +568,8 @@ class Trainer:
         summary_writer,
         options: TrainerOptions,
         distributed_option: DistributedOption,
+        output_dir = None,
     ) -> bool:
-
         grad_noise = options.grad_noise
         accum_grad = options.accum_grad
         grad_clip = options.grad_clip
@@ -569,6 +580,8 @@ class Trainer:
         use_wandb = options.use_wandb
         create_graph_in_tensorboard = options.create_graph_in_tensorboard
         distributed = distributed_option.distributed
+
+        group_dro_weights = torch.load(output_dir / "group_dro_weights.pth")
 
         if log_interval is None:
             try:
@@ -594,6 +607,7 @@ class Trainer:
                     break
 
             batch["utt_id"] = utt_id
+            batch["groups"] = [i.split("_")[1] for i in utt_id]
 
             batch = to_device(batch, "cuda" if ngpu > 0 else "cpu")
             if no_forward_run:
@@ -640,7 +654,7 @@ class Trainer:
                 **autocast_args,
             ):
                 with reporter.measure_time("forward_time"):
-                    retval = model(**batch)
+                    retval = model(**batch, valid=False, group_dro_weights = group_dro_weights)
 
                     # Note(kamo):
                     # Supporting two patterns for the returned value from the model
@@ -830,13 +844,16 @@ class Trainer:
         reporter: SubReporter,
         options: TrainerOptions,
         distributed_option: DistributedOption,
+        output_dir = None,
+        update_weights=False,
+        beta_cer_mov_avg = 0.1,
     ) -> None:
         ngpu = options.ngpu
         no_forward_run = options.no_forward_run
         distributed = distributed_option.distributed
-
+        group_stats = {}
+        cer_dict = {}
         model.eval()
-
         # [For distributed] Because iteration counts are not always equals between
         # processes, send stop-flag to the other processes if iterator is finished
         iterator_stop = torch.tensor(0).to("cuda" if ngpu > 0 else "cpu")
@@ -848,7 +865,9 @@ class Trainer:
                     break
 
             batch["utt_id"] = utt_id
-
+            batch["groups"] = [i.split("_")[1] for i in utt_id]
+            batch["return_lists"] = True
+            
             batch = to_device(batch, "cuda" if ngpu > 0 else "cpu")
             if no_forward_run:
                 continue
@@ -857,25 +876,71 @@ class Trainer:
                 options.use_amp,
                 **autocast_args,
             ):
-                retval = model(**batch)
+                retval = model(**batch, valid=True)
 
             if isinstance(retval, dict):
                 stats = retval["stats"]
                 weight = retval["weight"]
             else:
                 _, stats, weight = retval
+            for obs_idx, g in enumerate(batch["groups"]):
+                if g not in group_stats:
+                    group_stats[g] = {"sum_edit_distances": stats["edit_distances"][obs_idx].item(), "sum_ref_lengths": stats["ref_lengths"][obs_idx].item()}
+                else:
+                    group_stats[g]["sum_edit_distances"] += stats["edit_distances"][obs_idx].item()
+                    group_stats[g]["sum_ref_lengths"] += stats["ref_lengths"][obs_idx].item()
+            for key in ["edit_distances", "ref_lengths"]:
+                stats.pop(key, None)
             if ngpu > 1 or distributed:
                 # Apply weighted averaging for stats.
                 # if distributed, this method can also apply all_reduce()
                 stats, weight = recursive_average(stats, weight, distributed)
-
             reporter.register(stats, weight)
             reporter.next()
-
         else:
+            for k, v in group_stats.items():
+                cer_lang = v["sum_edit_distances"]/v["sum_ref_lengths"]
+                print(f"Validation CER {k}:", cer_lang)
+                cer_dict[k] = cer_lang
             if distributed:
                 iterator_stop.fill_(1)
                 torch.distributed.all_reduce(iterator_stop, ReduceOp.SUM)
+        current_epoch = reporter.get_epoch()
+        if update_weights:
+            print("CER dict", cer_dict)
+            max_lang = max(cer_dict, key=cer_dict.get)
+            max_cer = cer_dict[max_lang]
+            print(f"Max CER ({max_lang}): ", max_cer)
+            avg_cer = sum(cer_dict.values()) / len(cer_dict)
+            print("Avg CER: ", avg_cer)
+            if not (output_dir / "cer_mov_avg.pth").exists():
+                cer_mov_avg = cer_dict.copy()
+                torch.save(cer_mov_avg, output_dir / "cer_mov_avg.pth")
+                cer_mov_min = cer_dict.copy()
+                torch.save(cer_mov_min, output_dir / "cer_mov_min.pth")
+                print(f"CER mov avg at epoch {current_epoch}", cer_mov_avg)
+                print(f"CER mov min at epoch {current_epoch}", cer_mov_min)
+            else:
+                cer_mov_avg = torch.load(output_dir / "cer_mov_avg.pth")
+                cer_mov_min = torch.load(output_dir / "cer_mov_min.pth")
+                cer_mov_avg = {k: (1 - beta_cer_mov_avg) * cer_mov_avg[k] + beta_cer_mov_avg * cer_dict[k] for k in cer_mov_avg}
+                cer_mov_min = {k: min(cer_mov_min[k], cer_mov_avg[k]) for k in cer_mov_min}
+                torch.save(cer_mov_avg, output_dir / "cer_mov_avg.pth")
+                torch.save(cer_mov_min, output_dir / "cer_mov_min.pth")
+                print(f"CER mov avg at epoch {current_epoch}", cer_mov_avg)
+                print(f"CER mov min at epoch {current_epoch}", cer_mov_min)
+
+            print("Updating weights...")
+            cer_gap = {k: cer_mov_avg[k] - cer_mov_min[k] for k in cer_mov_avg}
+            print("CER gap:", cer_gap)
+            torch.save(cer_gap, output_dir / "cer_gap.pth")
+            alpha = 10
+            Z = sum(math.exp(alpha * v) for v in cer_gap.values())
+            group_dro_weights = {k: math.exp(alpha * v) / Z for k, v in cer_gap.items()}
+            print("Weights after update:", group_dro_weights)
+            torch.save(group_dro_weights, output_dir / "group_dro_weights.pth")
+        print()
+        print()
 
     @classmethod
     @torch.no_grad()

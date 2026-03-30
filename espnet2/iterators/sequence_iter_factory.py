@@ -55,6 +55,7 @@ class SequenceIterFactory(AbsIterFactory):
         num_workers: int = 0,
         collate_fn=None,
         pin_memory: bool = False,
+        groups = None,
     ):
 
         if not isinstance(batches, AbsSampler):
@@ -69,6 +70,7 @@ class SequenceIterFactory(AbsIterFactory):
         self.seed = seed
         self.num_workers = num_workers
         self.collate_fn = collate_fn
+        self.groups = groups
         # https://discuss.pytorch.org/t/what-is-the-disadvantage-of-using-pin-memory/1702
         self.pin_memory = pin_memory
 

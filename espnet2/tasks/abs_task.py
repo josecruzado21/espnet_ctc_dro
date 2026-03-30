@@ -1863,7 +1863,6 @@ class AbsTask(ABC):
                     utt = line.split()[0]
                     out.write(f"{utt} {utt.split('_')[1]}\n")
             utt2category_file = str(base_path / "utt2category")
-
         batch_sampler = build_batch_sampler(
             type=iter_options.batch_type,
             shape_files=iter_options.shape_files,
@@ -1880,7 +1879,6 @@ class AbsTask(ABC):
             ),
             utt2category_file=utt2category_file,
         )
-
         batches = list(batch_sampler)
         if iter_options.num_batches is not None:
             batches = batches[: iter_options.num_batches]
@@ -1924,6 +1922,7 @@ class AbsTask(ABC):
             num_workers=args.num_workers,
             collate_fn=iter_options.collate_fn,
             pin_memory=args.ngpu > 0,
+            groups = batch_sampler.groups
         )
 
     @classmethod

@@ -4,6 +4,7 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from typeguard import typechecked
+from .dro_ctc import DROCTCLoss
 
 
 class CTC(torch.nn.Module):
@@ -45,6 +46,8 @@ class CTC(torch.nn.Module):
             self.ctc_loss = torch.nn.CTCLoss(
                 reduction="none", zero_infinity=zero_infinity
             )
+        elif self.ctc_type == "droctc":
+            self.ctc_loss = DROCTCLoss()
         elif self.ctc_type == "builtin2":
             self.ignore_nan_grad = True
             logging.warning("builtin2")
@@ -72,10 +75,13 @@ class CTC(torch.nn.Module):
 
         self.reduce = reduce
 
-    def loss_fn(self, th_pred, th_target, th_ilen, th_olen) -> torch.Tensor:
-        if self.ctc_type == "builtin" or self.ctc_type == "brctc":
+    def loss_fn(self, th_pred, th_target, th_ilen, th_olen, groups=None, groups_weights=None, valid=False) -> torch.Tensor:
+        if self.ctc_type == "builtin" or self.ctc_type == "brctc" or self.ctc_type == 'droctc':
             th_pred = th_pred.log_softmax(2).float()
-            loss = self.ctc_loss(th_pred, th_target, th_ilen, th_olen)
+            if self.ctc_type == "droctc":
+                loss = self.ctc_loss(th_pred, th_target, th_ilen, th_olen, groups, groups_weights, valid)
+            else:
+                loss = self.ctc_loss(th_pred, th_target, th_ilen, th_olen)
             if self.ctc_type == "builtin":
                 size = th_pred.size(1)
             else:
@@ -150,7 +156,7 @@ class CTC(torch.nn.Module):
         else:
             raise NotImplementedError
 
-    def forward(self, hs_pad, hlens, ys_pad, ys_lens):
+    def forward(self, hs_pad, hlens, ys_pad, ys_lens, groups=None, groups_weights=None, valid=False):
         """Calculate CTC loss.
 
         Args:
@@ -167,7 +173,12 @@ class CTC(torch.nn.Module):
                 device=hs_pad.device, dtype=hs_pad.dtype
             )
             return loss
-
+        elif self.ctc_type == "droctc":
+            loss = self.loss_fn(ys_hat, ys_pad, hlens, ys_lens, groups=groups, 
+                                groups_weights = groups_weights, valid=valid).to(
+                device=hs_pad.device, dtype=hs_pad.dtype
+            )
+            return loss
         elif self.ctc_type == "gtnctc":
             # gtn expects list form for ys
             ys_true = [y[y != -1] for y in ys_pad]  # parse padded ys
