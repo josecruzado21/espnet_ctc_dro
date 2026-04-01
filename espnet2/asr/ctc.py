@@ -80,6 +80,9 @@ class CTC(torch.nn.Module):
             th_pred = th_pred.log_softmax(2).float()
             if self.ctc_type == "droctc":
                 loss = self.ctc_loss(th_pred, th_target, th_ilen, th_olen, groups, groups_weights, valid)
+                # When valid we do not aggregate so we return the list of losses per group
+                if valid:
+                    return loss
             else:
                 loss = self.ctc_loss(th_pred, th_target, th_ilen, th_olen)
             if self.ctc_type == "builtin":
@@ -167,7 +170,6 @@ class CTC(torch.nn.Module):
         """
         # hs_pad: (B, L, NProj) -> ys_hat: (B, L, Nvocab)
         ys_hat = self.ctc_lo(F.dropout(hs_pad, p=self.dropout_rate))
-
         if self.ctc_type == "brctc":
             loss = self.loss_fn(ys_hat, ys_pad, hlens, ys_lens).to(
                 device=hs_pad.device, dtype=hs_pad.dtype
@@ -178,7 +180,13 @@ class CTC(torch.nn.Module):
                                 groups_weights = groups_weights, valid=valid).to(
                 device=hs_pad.device, dtype=hs_pad.dtype
             )
+            if valid:
+                print("groups:", groups)
+                print("ctc_losses", loss)
+                size = loss.size(0)
+                return loss.sum() / size, loss
             return loss
+                
         elif self.ctc_type == "gtnctc":
             # gtn expects list form for ys
             ys_true = [y[y != -1] for y in ys_pad]  # parse padded ys

@@ -265,7 +265,7 @@ class ESPnetASRModel(AbsESPnetModel):
             encoder_out = encoder_out[0]
 
         loss_att, acc_att, cer_att, wer_att = None, None, None, None
-        loss_ctc, cer_ctc = None, None
+        loss_ctc, cer_ctc, ctc_per_sample = None, None, None
         loss_transducer, cer_transducer, wer_transducer = None, None, None
         loss_classif, acc_classif = None, None  # noqa
         stats = dict()
@@ -276,9 +276,14 @@ class ESPnetASRModel(AbsESPnetModel):
             loss_ctc, cer_ctc = self._calc_ctc_loss(
                 encoder_out, encoder_out_lens, text, text_lengths, return_lists, groups, group_dro_weights, valid
             )
-
+            if isinstance(loss_ctc, tuple):
+                print("LOSS CTC >1: ", loss_ctc)
+                ctc_per_sample = loss_ctc[1]
+                loss_ctc = loss_ctc[0]
+                
             # Collect CTC branch stats
             stats["loss_ctc"] = loss_ctc.detach() if loss_ctc is not None else None
+            stats["ctc_per_sample"] = ctc_per_sample if ctc_per_sample is not None else None
             if isinstance(cer_ctc, dict):
                 stats["cer_ctc"] = cer_ctc["cer_ctc"]
                 stats["edit_distances"] = cer_ctc["edit_distances"]

@@ -846,14 +846,36 @@ class Trainer:
         distributed_option: DistributedOption,
         output_dir = None,
         update_weights=False,
-        beta_cer_mov_avg = 1.0,
+        beta_mov_avg = 1.0,
+        metric_for_update = "ctc",
     ) -> None:
-        print("BETA:",  beta_cer_mov_avg)
+        print("BETA:",  beta_mov_avg)
+        # CER History
+        if not (output_dir / "cer_history.pth").exists():
+            cer_history = []
+            ctc_history = []
+            weights_history = []
+            last_weights = torch.load(output_dir / "group_dro_weights.pth")
+            cer_mov_avg_history = []
+            cer_mov_min_history = []
+            cer_gap_history = []
+            ctc_gap_history = []
+        else:
+            cer_history = torch.load(output_dir / "cer_history.pth")
+            ctc_history = torch.load(output_dir / "ctc_history.pth")
+            weights_history = torch.load(output_dir / "group_dro_weights_history.pth")
+            last_weights = torch.load(output_dir / "group_dro_weights.pth")
+            cer_mov_avg_history = torch.load(output_dir / "cer_mov_avg_history.pth")
+            cer_mov_min_history = torch.load(output_dir / "cer_mov_min_history.pth")
+            cer_gap_history = torch.load(output_dir / "cer_gap_history.pth")
+            ctc_gap_history = torch.load(output_dir / "ctc_gap_history.pth")
+        
         ngpu = options.ngpu
         no_forward_run = options.no_forward_run
         distributed = distributed_option.distributed
         group_stats = {}
         cer_dict = {}
+        ctc_dict = {}
         model.eval()
         # [For distributed] Because iteration counts are not always equals between
         # processes, send stop-flag to the other processes if iterator is finished
@@ -884,13 +906,28 @@ class Trainer:
                 weight = retval["weight"]
             else:
                 _, stats, weight = retval
+            ctc_per_sample = False
+            if  stats["ctc_per_sample"] is not None:
+                ctc_per_sample = True
             for obs_idx, g in enumerate(batch["groups"]):
                 if g not in group_stats:
-                    group_stats[g] = {"sum_edit_distances": stats["edit_distances"][obs_idx].item(), "sum_ref_lengths": stats["ref_lengths"][obs_idx].item()}
+                    group_stats[g] = {"sum_edit_distances": stats["edit_distances"][obs_idx].item(), 
+                                      "sum_ref_lengths": stats["ref_lengths"][obs_idx].item()}
+                    if ctc_per_sample:
+                        # print("CTC for sample1:", stats["ctc_per_sample"][obs_idx].item())
+                        if stats["ctc_per_sample"][obs_idx] is not None and torch.isfinite(stats["ctc_per_sample"][obs_idx]):
+                            group_stats[g]["sum_ctc"] = stats["ctc_per_sample"][obs_idx].item()
+                            group_stats [g]["count_samples"] = 1
                 else:
                     group_stats[g]["sum_edit_distances"] += stats["edit_distances"][obs_idx].item()
                     group_stats[g]["sum_ref_lengths"] += stats["ref_lengths"][obs_idx].item()
-            for key in ["edit_distances", "ref_lengths"]:
+                    if ctc_per_sample:
+                        # print("CTC for sample2:", stats["ctc_per_sample"][obs_idx].item())
+                        if stats["ctc_per_sample"][obs_idx] is not None and torch.isfinite(stats["ctc_per_sample"][obs_idx]):
+                            group_stats[g]["sum_ctc"] += stats["ctc_per_sample"][obs_idx].item()
+                            group_stats[g]["count_samples"] += 1
+            print("Group stats:", group_stats)
+            for key in ["edit_distances", "ref_lengths", "ctc_per_sample"]:
                 stats.pop(key, None)
             if ngpu > 1 or distributed:
                 # Apply weighted averaging for stats.
@@ -901,14 +938,24 @@ class Trainer:
         else:
             for k, v in group_stats.items():
                 cer_lang = v["sum_edit_distances"]/v["sum_ref_lengths"]
-                print(f"Validation CER {k}:", cer_lang)
+                # print(f"Validation CER {k}:", cer_lang)
                 cer_dict[k] = cer_lang
+                if "sum_ctc" in v:
+                    ctc_dict[k] = v["sum_ctc"] / v["count_samples"]
+            print("CTC_dict:", ctc_dict)
+            print("CER dict", cer_dict)
+            cer_history.append(cer_dict)
+            ctc_history.append(ctc_dict)
+            weights_history.append(last_weights)
+            torch.save(cer_history, output_dir / "cer_history.pth")
+            torch.save(ctc_history, output_dir / "ctc_history.pth")
+            torch.save(weights_history, output_dir / "group_dro_weights_history.pth")
+
             if distributed:
                 iterator_stop.fill_(1)
                 torch.distributed.all_reduce(iterator_stop, ReduceOp.SUM)
         current_epoch = reporter.get_epoch()
         if update_weights:
-            print("CER dict", cer_dict)
             max_lang = max(cer_dict, key=cer_dict.get)
             max_cer = cer_dict[max_lang]
             print(f"Max CER ({max_lang}): ", max_cer)
@@ -919,27 +966,59 @@ class Trainer:
                 torch.save(cer_mov_avg, output_dir / "cer_mov_avg.pth")
                 cer_mov_min = cer_dict.copy()
                 torch.save(cer_mov_min, output_dir / "cer_mov_min.pth")
-                print(f"CER mov avg at epoch {current_epoch}", cer_mov_avg)
-                print(f"CER mov min at epoch {current_epoch}", cer_mov_min)
+                ctc_mov_avg = ctc_dict.copy()
+                torch.save(ctc_mov_avg, output_dir / "ctc_mov_avg.pth")
+                ctc_mov_min = ctc_dict.copy()
+                torch.save(ctc_mov_min, output_dir / "ctc_mov_min.pth")
             else:
                 cer_mov_avg = torch.load(output_dir / "cer_mov_avg.pth")
                 cer_mov_min = torch.load(output_dir / "cer_mov_min.pth")
-                cer_mov_avg = {k: (1 - beta_cer_mov_avg) * cer_mov_avg[k] + beta_cer_mov_avg * cer_dict[k] for k in cer_mov_avg}
+                ctc_mov_avg = torch.load(output_dir / "ctc_mov_avg.pth")
+                ctc_mov_min = torch.load(output_dir / "ctc_mov_min.pth")
+                cer_mov_avg = {k: (1 - beta_mov_avg) * cer_mov_avg[k] + beta_mov_avg * cer_dict[k] for k in cer_mov_avg}
                 cer_mov_min = {k: min(cer_mov_min[k], cer_mov_avg[k]) for k in cer_mov_min}
+                # Updating CTC mov avg
+                ctc_mov_avg = {k: (1 - beta_mov_avg) * ctc_mov_avg[k] + beta_mov_avg * ctc_dict[k] for k in ctc_mov_avg}
+                ctc_mov_min = {k: min(ctc_mov_min[k], ctc_mov_avg[k]) for k in ctc_mov_min}
                 torch.save(cer_mov_avg, output_dir / "cer_mov_avg.pth")
                 torch.save(cer_mov_min, output_dir / "cer_mov_min.pth")
-                print(f"CER mov avg at epoch {current_epoch}", cer_mov_avg)
-                print(f"CER mov min at epoch {current_epoch}", cer_mov_min)
-
+            print(f"CER mov avg at epoch {current_epoch}", cer_mov_avg)
+            print(f"CER mov min at epoch {current_epoch}", cer_mov_min)
+            print(f"CTC mov avg at epoch {current_epoch}", ctc_mov_avg)
+            print(f"CTC mov min at epoch {current_epoch}", ctc_mov_min)
+            cer_mov_avg_history.append(cer_mov_avg)
+            cer_mov_min_history.append(cer_mov_min)
             print("Updating weights...")
             cer_gap = {k: cer_mov_avg[k] - cer_mov_min[k] for k in cer_mov_avg}
+            ctc_gap = {k: ctc_dict[k] - ctc_mov_min[k] for k in ctc_dict}
             print("CER gap:", cer_gap)
+            print("CTC gap:", ctc_gap)
             torch.save(cer_gap, output_dir / "cer_gap.pth")
+            torch.save(ctc_gap, output_dir / "ctc_gap.pth")
             alpha = 10
-            Z = sum(math.exp(alpha * v) for v in cer_gap.values())
-            group_dro_weights = {k: math.exp(alpha * v) / Z for k, v in cer_gap.items()}
+            if metric_for_update == "cer":
+                Z = sum(math.exp(alpha * v) for v in cer_gap.values())
+                group_dro_weights = {k: math.exp(alpha * v) / Z for k, v in cer_gap.items()}
+            elif metric_for_update == "ctc":
+                Z = sum(math.exp(alpha * v) for v in ctc_gap.values())
+                group_dro_weights = {k: math.exp(alpha * v) / Z for k, v in ctc_gap.items()}
+            cer_gap_history.append(cer_gap)
+            ctc_gap_history.append(ctc_gap)
+            torch.save(cer_mov_avg_history, output_dir / "cer_mov_avg_history.pth")
+            torch.save(cer_mov_min_history, output_dir / "cer_mov_min_history.pth")
+            torch.save(cer_gap_history, output_dir / "cer_gap_history.pth")
+            torch.save(ctc_gap_history, output_dir / "ctc_gap_history.pth")
             print("Weights after update:", group_dro_weights)
             torch.save(group_dro_weights, output_dir / "group_dro_weights.pth")
+        else:
+            cer_mov_avg_history.append(None)
+            cer_mov_min_history.append(None)
+            cer_gap_history.append(None)
+            ctc_gap_history.append(None)
+            torch.save(cer_mov_avg_history, output_dir / "cer_mov_avg_history.pth")
+            torch.save(cer_mov_min_history, output_dir / "cer_mov_min_history.pth")
+            torch.save(cer_gap_history, output_dir / "cer_gap_history.pth")
+            torch.save(ctc_gap_history, output_dir / "ctc_gap_history.pth")
         print()
         print()
 
