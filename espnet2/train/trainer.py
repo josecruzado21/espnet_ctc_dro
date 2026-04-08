@@ -847,7 +847,7 @@ class Trainer:
         output_dir = None,
         update_weights=False,
         beta_mov_avg = 1.0,
-        metric_for_update = "ctc",
+        metric_for_update = "cer",
     ) -> None:
         print("BETA:",  beta_mov_avg)
         # CER History
@@ -975,13 +975,18 @@ class Trainer:
                 cer_mov_min = torch.load(output_dir / "cer_mov_min.pth")
                 ctc_mov_avg = torch.load(output_dir / "ctc_mov_avg.pth")
                 ctc_mov_min = torch.load(output_dir / "ctc_mov_min.pth")
+                # Update CER moving avg/min
                 cer_mov_avg = {k: (1 - beta_mov_avg) * cer_mov_avg[k] + beta_mov_avg * cer_dict[k] for k in cer_mov_avg}
                 cer_mov_min = {k: min(cer_mov_min[k], cer_mov_avg[k]) for k in cer_mov_min}
-                # Updating CTC mov avg
-                ctc_mov_avg = {k: (1 - beta_mov_avg) * ctc_mov_avg[k] + beta_mov_avg * ctc_dict[k] for k in ctc_mov_avg}
-                ctc_mov_min = {k: min(ctc_mov_min[k], ctc_mov_avg[k]) for k in ctc_mov_min}
                 torch.save(cer_mov_avg, output_dir / "cer_mov_avg.pth")
                 torch.save(cer_mov_min, output_dir / "cer_mov_min.pth")
+                # Updating CTC mov avg/min
+                ctc_mov_avg = {k: (1 - beta_mov_avg) * ctc_mov_avg[k] + beta_mov_avg * ctc_dict[k] for k in ctc_mov_avg}
+                print("no updating CTC mov min:")
+                print("CTC mov min:", ctc_mov_min)
+                # ctc_mov_min = {k: min(ctc_mov_min[k], ctc_mov_avg[k]) for k in ctc_mov_min}
+                torch.save(ctc_mov_avg, output_dir / "ctc_mov_avg.pth")
+                # torch.save(ctc_mov_min, output_dir / "ctc_mov_min.pth")
             print(f"CER mov avg at epoch {current_epoch}", cer_mov_avg)
             print(f"CER mov min at epoch {current_epoch}", cer_mov_min)
             print(f"CTC mov avg at epoch {current_epoch}", ctc_mov_avg)
@@ -995,13 +1000,24 @@ class Trainer:
             print("CTC gap:", ctc_gap)
             torch.save(cer_gap, output_dir / "cer_gap.pth")
             torch.save(ctc_gap, output_dir / "ctc_gap.pth")
-            alpha = 10
             if metric_for_update == "cer":
-                Z = sum(math.exp(alpha * v) for v in cer_gap.values())
-                group_dro_weights = {k: math.exp(alpha * v) / Z for k, v in cer_gap.items()}
+                temperature = 1
+                vals = torch.tensor(list(cer_gap.values()), dtype=torch.float32)
+                logits = vals / temperature
+                logZ = torch.logsumexp(logits, dim=0)
+                group_dro_weights = {
+                    k: float(torch.exp(v - logZ))
+                    for k, v in zip(cer_gap.keys(), logits)
+                }
             elif metric_for_update == "ctc":
-                Z = sum(math.exp(alpha * v) for v in ctc_gap.values())
-                group_dro_weights = {k: math.exp(alpha * v) / Z for k, v in ctc_gap.items()}
+                temperature = 500
+                vals = torch.tensor(list(ctc_gap.values()), dtype=torch.float32)
+                logits = vals / temperature
+                logZ = torch.logsumexp(logits, dim=0)
+                group_dro_weights = {
+                    k: float(torch.exp(v - logZ))
+                    for k, v in zip(ctc_gap.keys(), logits)
+                }
             cer_gap_history.append(cer_gap)
             ctc_gap_history.append(ctc_gap)
             torch.save(cer_mov_avg_history, output_dir / "cer_mov_avg_history.pth")
