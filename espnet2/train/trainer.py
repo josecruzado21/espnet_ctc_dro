@@ -1001,7 +1001,7 @@ class Trainer:
             torch.save(cer_gap, output_dir / "cer_gap.pth")
             torch.save(ctc_gap, output_dir / "ctc_gap.pth")
             if metric_for_update == "cer":
-                temperature = 1
+                temperature = 0.1
                 vals = torch.tensor(list(cer_gap.values()), dtype=torch.float32)
                 logits = vals / temperature
                 logZ = torch.logsumexp(logits, dim=0)
