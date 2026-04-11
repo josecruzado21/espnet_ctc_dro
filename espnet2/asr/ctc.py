@@ -84,7 +84,9 @@ class CTC(torch.nn.Module):
                 if valid:
                     return loss
             else:
+                print("Using builtin CTC loss")
                 loss = self.ctc_loss(th_pred, th_target, th_ilen, th_olen)
+                print("loss1:", loss)
             if self.ctc_type == "builtin":
                 size = th_pred.size(1)
             else:
@@ -93,6 +95,7 @@ class CTC(torch.nn.Module):
             if self.reduce:
                 # Batch-size average
                 loss = loss.sum() / size
+                print("loss2:", loss)
             else:
                 loss = loss / size
             return loss
