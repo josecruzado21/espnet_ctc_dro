@@ -987,12 +987,12 @@ class Trainer:
                 ctc_mov_avg = {k: (1 - beta_mov_avg) * ctc_mov_avg[k] + beta_mov_avg * ctc_dict[k] for k in ctc_mov_avg}
                 torch.save(ctc_mov_avg, output_dir / "ctc_mov_avg.pth")
 
-                # Uncomment lines below to not update CTC after warmup epochs, which is equivalent to using the initial CTC as the fixed baseline for DRO weights calculation.
-                print("Updating CTC mov min:")
-                # print("no updating CTC mov min:")
+                # Comment lines below to not update CTC after warmup epochs, which is equivalent to using the initial CTC as the fixed baseline for DRO weights calculation.
+                # print("Updating CTC mov min:")
+                print("no updating CTC mov min:")
                 print("CTC mov min:", ctc_mov_min)
-                ctc_mov_min = {k: min(ctc_mov_min[k], ctc_mov_avg[k]) for k in ctc_mov_min}
-                torch.save(ctc_mov_min, output_dir / "ctc_mov_min.pth")
+                # ctc_mov_min = {k: min(ctc_mov_min[k], ctc_mov_avg[k]) for k in ctc_mov_min}
+                # torch.save(ctc_mov_min, output_dir / "ctc_mov_min.pth")
             print(f"CER mov avg at epoch {current_epoch}", cer_mov_avg)
             print(f"CER mov min at epoch {current_epoch}", cer_mov_min)
             print(f"CTC mov avg at epoch {current_epoch}", ctc_mov_avg)
