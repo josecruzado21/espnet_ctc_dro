@@ -30,6 +30,7 @@ class DROCTCLoss(torch.nn.modules.loss._Loss):
             zero_infinity=self.zero_infinity)
         if not valid:    
             print("DROCTC losses before weighting:", losses)
+            print(groups)
             losses = torch.stack([
                 groups_weights[groups[ix]] * losses[ix] for ix in range(losses.shape[0])
             ])
