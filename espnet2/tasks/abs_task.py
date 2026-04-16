@@ -734,6 +734,13 @@ class AbsTask(ABC):
             default=dict(),
             help="Configuration for efficient finetuning",
         )
+        group.add_argument(
+            "--return_lists",
+            type=str2bool,
+            default=True,
+            help="Whether to return per-sample lists from the model during validation "
+            "(required for per-group CER/CTC tracking in DRO training)",
+        )
 
         group = parser.add_argument_group("Pretraining model related")
         group.add_argument("--pretrain_path", help="This option is obsoleted")

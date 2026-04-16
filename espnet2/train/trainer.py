@@ -107,6 +107,7 @@ class TrainerOptions:
     create_graph_in_tensorboard: bool
     gradient_as_bucket_view: bool
     ddp_comm_hook: Optional[str]
+    return_lists: bool
 
 
 class Trainer:
@@ -889,7 +890,7 @@ class Trainer:
 
             batch["utt_id"] = utt_id
             batch["groups"] = [i.split("_")[1] for i in utt_id]
-            batch["return_lists"] = True
+            batch["return_lists"] = options.return_lists
             
             batch = to_device(batch, "cuda" if ngpu > 0 else "cpu")
             if no_forward_run:
