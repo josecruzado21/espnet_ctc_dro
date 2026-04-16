@@ -108,6 +108,9 @@ class TrainerOptions:
     gradient_as_bucket_view: bool
     ddp_comm_hook: Optional[str]
     return_lists: bool
+    warmup_epochs: int
+    beta_mov_avg: float
+    metric_for_update: Optional[str]
 
 
 class Trainer:
@@ -190,11 +193,11 @@ class Trainer:
         plot_attention_iter_factory: Optional[AbsIterFactory],
         trainer_options,
         distributed_option: DistributedOption,
-        warmup_epochs = 5,
     ) -> None:
         """Perform training. This method performs the main process of training."""
         # NOTE(kamo): Don't check the type more strictly as far trainer_options
         assert is_dataclass(trainer_options), type(trainer_options)
+        warmup_epochs = trainer_options.warmup_epochs
         assert len(optimizers) == len(schedulers), (len(optimizers), len(schedulers))
         if isinstance(trainer_options.keep_nbest_models, int):
             keep_nbest_models = [trainer_options.keep_nbest_models]
@@ -847,9 +850,9 @@ class Trainer:
         distributed_option: DistributedOption,
         output_dir = None,
         update_weights=False,
-        beta_mov_avg = 1.0,
-        metric_for_update = None,
     ) -> None:
+        beta_mov_avg = options.beta_mov_avg
+        metric_for_update = options.metric_for_update
         print("BETA:",  beta_mov_avg)
         # CER History
         if not (output_dir / "cer_history.pth").exists():

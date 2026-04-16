@@ -741,6 +741,26 @@ class AbsTask(ABC):
             help="Whether to return per-sample lists from the model during validation "
             "(required for per-group CER/CTC tracking in DRO training)",
         )
+        group.add_argument(
+            "--warmup_epochs",
+            type=int,
+            default=5,
+            help="Number of epochs before DRO group weights start being updated",
+        )
+        group.add_argument(
+            "--beta_mov_avg",
+            type=float,
+            default=1.0,
+            help="Momentum coefficient for the moving average of per-group CER/CTC "
+            "used in DRO weight updates (1.0 = no smoothing)",
+        )
+        group.add_argument(
+            "--metric_for_update",
+            type=str_or_none,
+            default=None,
+            help="Metric used to update DRO group weights: 'cer', 'ctc', or None "
+            "(None keeps uniform weights)",
+        )
 
         group = parser.add_argument_group("Pretraining model related")
         group.add_argument("--pretrain_path", help="This option is obsoleted")
