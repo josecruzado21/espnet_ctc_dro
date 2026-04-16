@@ -274,7 +274,7 @@ class ESPnetASRModel(AbsESPnetModel):
         if self.ctc_weight != 0.0:
             valid = kwargs.get("valid", None)
             loss_ctc, cer_ctc = self._calc_ctc_loss(
-                encoder_out, encoder_out_lens, text, text_lengths, return_lists, groups, group_dro_weights, valid
+                encoder_out, encoder_out_lens, text, text_lengths, utt_id = utt_id, return_lists = return_lists, groups = groups, group_dro_weights = group_dro_weights, valid =  valid
             )
             if isinstance(loss_ctc, tuple):
                 print("LOSS CTC >1: ", loss_ctc)
@@ -321,6 +321,7 @@ class ESPnetASRModel(AbsESPnetModel):
                                 encoder_out_lens,
                                 aux_data_tensor,
                                 aux_data_lengths,
+                                utt_id = utt_id
                             )
                         else:
                             raise Exception(
@@ -328,7 +329,7 @@ class ESPnetASRModel(AbsESPnetModel):
                             )
                 if loss_ic is None:
                     loss_ic, cer_ic = self._calc_ctc_loss(
-                        intermediate_out, encoder_out_lens, text, text_lengths
+                        intermediate_out, encoder_out_lens, text, text_lengths, utt_id = utt_id
                     )
                 loss_interctc = loss_interctc + loss_ic
 
@@ -635,13 +636,14 @@ class ESPnetASRModel(AbsESPnetModel):
         encoder_out_lens: torch.Tensor,
         ys_pad: torch.Tensor,
         ys_pad_lens: torch.Tensor,
+        utt_id = None,
         return_lists = False,
         groups=None, 
         groups_weights=None,
         valid = False
     ):
         # Calc CTC loss
-        loss_ctc = self.ctc(encoder_out, encoder_out_lens, ys_pad, ys_pad_lens, 
+        loss_ctc = self.ctc(encoder_out, encoder_out_lens, ys_pad, ys_pad_lens, utt_id=utt_id,
                             groups=groups, groups_weights=groups_weights, valid=valid)
         # Calc CER using CTC
         cer_ctc = None

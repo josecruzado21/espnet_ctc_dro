@@ -4,7 +4,7 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from typeguard import typechecked
-from .dro_ctc import DROCTCLoss
+from .dro_ctc import DROCTCLoss, DROCTCLossOG
 
 
 class CTC(torch.nn.Module):
@@ -48,6 +48,10 @@ class CTC(torch.nn.Module):
             )
         elif self.ctc_type == "droctc":
             self.ctc_loss = DROCTCLoss()
+
+        elif self.ctc_type == "droctc_og":
+            self.ctc_loss = DROCTCLossOG()
+
         elif self.ctc_type == "builtin2":
             self.ignore_nan_grad = True
             logging.warning("builtin2")
@@ -75,7 +79,7 @@ class CTC(torch.nn.Module):
 
         self.reduce = reduce
 
-    def loss_fn(self, th_pred, th_target, th_ilen, th_olen, groups=None, groups_weights=None, valid=False) -> torch.Tensor:
+    def loss_fn(self, th_pred, th_target, th_ilen, th_olen, utt_id=None, groups=None, groups_weights=None, valid=False) -> torch.Tensor:
         if self.ctc_type == "builtin" or self.ctc_type == "brctc" or self.ctc_type == 'droctc':
             th_pred = th_pred.log_softmax(2).float()
             if self.ctc_type == "droctc":
@@ -83,6 +87,8 @@ class CTC(torch.nn.Module):
                 # When valid we do not aggregate so we return the list of losses per group
                 if valid:
                     return loss
+            elif self.ctc_type == "droctc_og":
+                loss = self.ctc_loss(th_pred, th_target, th_ilen, th_olen, utt_id, valid=valid)
             else:
                 print("Using builtin CTC loss")
                 loss = self.ctc_loss(th_pred, th_target, th_ilen, th_olen)
@@ -97,7 +103,7 @@ class CTC(torch.nn.Module):
             if self.reduce:
                 # Batch-size average
                 if self.ctc_type == "builtin":
-                    print("avoid clipping")
+                    print("avoid clipping for builtin")
                     loss = loss.sum() / (size * 6)
                 else:
                     loss = loss.sum() / size
@@ -167,7 +173,7 @@ class CTC(torch.nn.Module):
         else:
             raise NotImplementedError
 
-    def forward(self, hs_pad, hlens, ys_pad, ys_lens, groups=None, groups_weights=None, valid=False):
+    def forward(self, hs_pad, hlens, ys_pad, ys_lens, utt_id=None, groups=None, groups_weights=None, valid=False):
         """Calculate CTC loss.
 
         Args:
@@ -194,7 +200,13 @@ class CTC(torch.nn.Module):
                 size = loss.size(0)
                 return loss.sum() / size, loss
             return loss
-                
+        
+        elif self.ctc_type == "droctc_og":
+            loss = self.loss_fn(ys_hat, ys_pad, hlens, ys_lens, utt_id=utt_id, valid=valid).to(
+                device=hs_pad.device, dtype=hs_pad.dtype
+            )
+            return loss
+
         elif self.ctc_type == "gtnctc":
             # gtn expects list form for ys
             ys_true = [y[y != -1] for y in ys_pad]  # parse padded ys

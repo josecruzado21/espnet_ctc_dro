@@ -202,6 +202,7 @@ class IteratorOptions:
     batch_size: int
     batch_bins: int
     batch_type: str
+    duration_batch_length: int
     max_cache_size: float
     max_cache_fd: int
     allow_multi_rates: bool
@@ -761,6 +762,12 @@ class AbsTask(ABC):
             help="Metric used to update DRO group weights: 'cer', 'ctc', or None "
             "(None keeps uniform weights)",
         )
+        group.add_argument(
+            "--continuous",
+            type=str2bool,
+            default=True,
+            help="Whether to use continupos for calculating minimum metrics for DRO weight updates",
+        )
 
         group = parser.add_argument_group("Pretraining model related")
         group.add_argument("--pretrain_path", help="This option is obsoleted")
@@ -898,6 +905,11 @@ class AbsTask(ABC):
             default="folded",
             choices=list(BATCH_TYPES) + list(CATEGORY_BATCH_TYPES),
             help=_batch_type_help,
+        )
+        group.add_argument(
+            "--duration_batch_length",
+            type=int,
+            default=-1
         )
         group.add_argument(
             "--valid_batch_type",
@@ -1691,6 +1703,7 @@ class AbsTask(ABC):
             batch_size = args.batch_size
             batch_bins = args.batch_bins
             batch_type = args.batch_type
+            duration_batch_length = args.duration_batch_length
             max_cache_size = args.max_cache_size
             max_cache_fd = args.max_cache_fd
             allow_multi_rates = args.allow_multi_rates
@@ -1728,6 +1741,7 @@ class AbsTask(ABC):
             num_batches = None
             num_iters_per_epoch = None
             train = False
+            duration_batch_length = args.duration_batch_length
 
         elif mode == "plot_att":
             preprocess_fn = cls.build_preprocess_fn(args, train=False)
@@ -1735,6 +1749,7 @@ class AbsTask(ABC):
             data_path_and_name_and_type = args.valid_data_path_and_name_and_type
             shape_files = args.valid_shape_file
             batch_type = "unsorted"
+            duration_batch_length = args.duration_batch_length
             batch_size = 1
             batch_bins = 0
             num_batches = args.num_att_plot
@@ -1764,6 +1779,7 @@ class AbsTask(ABC):
             distributed=distributed,
             num_iters_per_epoch=num_iters_per_epoch,
             train=train,
+            duration_batch_length=duration_batch_length
         )
 
     @classmethod
@@ -1905,7 +1921,22 @@ class AbsTask(ABC):
                 else args.min_batch_size
             ),
             utt2category_file=utt2category_file,
+            duration_batch_length=iter_options.duration_batch_length
         )
+
+        if iter_options.batch_type in ["duration_language"]:
+            # dump the category2num_batches file to read later
+            category2numbatches = batch_sampler.category2numbatches
+            with open(str(
+                Path(
+                    Path(iter_options.data_path_and_name_and_type[0][0]).parent,
+                    "category2numbatches",
+                )
+            ), 'w') as f:
+                print(Path(iter_options.data_path_and_name_and_type[0][0]).parent)
+                for category in category2numbatches:
+                    f.write(f'{category} {category2numbatches[category]}\n')
+
         batches = list(batch_sampler)
         if iter_options.num_batches is not None:
             batches = batches[: iter_options.num_batches]

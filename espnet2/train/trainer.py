@@ -111,6 +111,7 @@ class TrainerOptions:
     warmup_epochs: int
     beta_mov_avg: float
     metric_for_update: Optional[str]
+    continuous: bool
 
 
 class Trainer:
@@ -853,6 +854,7 @@ class Trainer:
     ) -> None:
         beta_mov_avg = options.beta_mov_avg
         metric_for_update = options.metric_for_update
+        continuous = options.continuous
         print("BETA:",  beta_mov_avg)
         # CER History
         if not (output_dir / "cer_history.pth").exists():
@@ -984,20 +986,19 @@ class Trainer:
                 # Update CER moving avg/min
                 print("no updating CER mov min:")
                 cer_mov_avg = {k: (1 - beta_mov_avg) * cer_mov_avg[k] + beta_mov_avg * cer_dict[k] for k in cer_mov_avg}
-                # cer_mov_min = {k: min(cer_mov_min[k], cer_mov_avg[k]) for k in cer_mov_min}
                 torch.save(cer_mov_avg, output_dir / "cer_mov_avg.pth")
-                # torch.save(cer_mov_min, output_dir / "cer_mov_min.pth")
+                if continuous:
+                    print("Updating CER mov min:")
+                    cer_mov_min = {k: min(cer_mov_min[k], cer_mov_avg[k]) for k in cer_mov_min}
+                    torch.save(cer_mov_min, output_dir / "cer_mov_min.pth")
+                    print("Updating CTC mov min:")
+                    ctc_mov_min = {k: min(ctc_mov_min[k], ctc_mov_avg[k]) for k in ctc_mov_min}
+                    torch.save(ctc_mov_min, output_dir / "ctc_mov_min.pth")
 
                 # Updating CTC mov avg/min
                 ctc_mov_avg = {k: (1 - beta_mov_avg) * ctc_mov_avg[k] + beta_mov_avg * ctc_dict[k] for k in ctc_mov_avg}
                 torch.save(ctc_mov_avg, output_dir / "ctc_mov_avg.pth")
 
-                # Comment lines below to not update CTC after warmup epochs, which is equivalent to using the initial CTC as the fixed baseline for DRO weights calculation.
-                # print("Updating CTC mov min:")
-                # print("no updating CTC mov min:")
-                # print("CTC mov min:", ctc_mov_min)
-                # ctc_mov_min = {k: min(ctc_mov_min[k], ctc_mov_avg[k]) for k in ctc_mov_min}
-                # torch.save(ctc_mov_min, output_dir / "ctc_mov_min.pth")
             print(f"CER mov avg at epoch {current_epoch}", cer_mov_avg)
             print(f"CER mov min at epoch {current_epoch}", cer_mov_min)
             print(f"CTC mov avg at epoch {current_epoch}", ctc_mov_avg)
