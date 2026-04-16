@@ -87,6 +87,8 @@ class CTC(torch.nn.Module):
                 print("Using builtin CTC loss")
                 loss = self.ctc_loss(th_pred, th_target, th_ilen, th_olen)
                 print("loss1:", loss)
+                if valid:
+                    return loss
             if self.ctc_type == "builtin":
                 size = th_pred.size(1)
             else:
