@@ -847,7 +847,7 @@ class Trainer:
         output_dir = None,
         update_weights=False,
         beta_mov_avg = 1.0,
-        metric_for_update = "cer",
+        metric_for_update = None,
     ) -> None:
         print("BETA:",  beta_mov_avg)
         # CER History
@@ -1025,6 +1025,8 @@ class Trainer:
                     k: float(torch.exp(v - logZ))
                     for k, v in zip(ctc_gap.keys(), logits)
                 }
+            elif metric_for_update == None:
+                group_dro_weights = {k: 1 / len(ctc_gap) for k in cer_gap.keys()}
             cer_gap_history.append(cer_gap)
             ctc_gap_history.append(ctc_gap)
             torch.save(cer_mov_avg_history, output_dir / "cer_mov_avg_history.pth")
