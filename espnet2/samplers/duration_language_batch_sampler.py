@@ -40,6 +40,15 @@ class DurationLanguageBatchSampler(AbsSampler):
         #    uttA <anything is o.k>
         #    uttB <anything is o.k>
 
+        if utt2category_file is not None:
+            groups = set()
+            with open(utt2category_file, "r") as f:
+                for line in f:
+                    _, group = line.strip().split()
+                    groups.add(group)
+            groups = list(groups)
+            self.groups = groups
+
         utt2shapes = [
             load_num_sequence_text(s, loader_type="csv_int") for s in shape_files
         ]
