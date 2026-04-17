@@ -168,11 +168,13 @@ class DROCTCLossOG(torch.nn.Module):
         
         if self.normalize_grad:
             # multiply loss by number of groups
+            print("losses before dro weighting:", losses)
             dro_losses = torch.stack([
                 losses[ix] * self.dro_q[batch_lang_q_indices[ix]] 
                 * self.dro_group_count
                 for ix in range(losses.shape[0])
             ])
+            print("losses after dro weighting:", dro_losses)
         else:
             dro_losses = torch.stack([
                 losses[ix] * self.dro_q[batch_lang_q_indices[ix]] 
