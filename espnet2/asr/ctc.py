@@ -30,6 +30,7 @@ class CTC(torch.nn.Module):
         dro_group_count: int = 0,
         dro_step_size: float = 0.01,
         dro_q_epsilon: float = 1e-10,
+        accumulation: bool = False,
         smoothing: float = 0.,
         normalize_grad: bool = True,
         reduce: bool = True,
@@ -38,6 +39,7 @@ class CTC(torch.nn.Module):
         brctc_risk_strategy: str = "exp",
         brctc_group_strategy: str = "end",
         brctc_risk_factor: float = 0.0,
+        agg: str = "sum",
     ):
         super().__init__()
         eprojs = encoder_output_size
@@ -55,7 +57,16 @@ class CTC(torch.nn.Module):
             self.ctc_loss = DROCTCLoss()
 
         elif self.ctc_type == "droctc_og":
-            self.ctc_loss = DROCTCLossOG()
+            self.ctc_loss = DROCTCLoss(
+                reduction="none", 
+                zero_infinity=zero_infinity, 
+                dro_group_count=dro_group_count,
+                dro_step_size=dro_step_size,
+                dro_q_epsilon=dro_q_epsilon,
+                accumulation=accumulation,
+                smoothing=smoothing,
+                normalize_grad=normalize_grad,
+                agg=agg)
 
         elif self.ctc_type == "builtin2":
             self.ignore_nan_grad = True
