@@ -1602,6 +1602,16 @@ class AbsTask(ABC):
                 distributed_option=distributed_option,
                 mode="valid",
             )
+
+            # at this stage, the category2numbatches file has been created
+            # init DROCTC with this
+            if args.ctc_conf["ctc_type"] == 'droctc_og':
+                # load both number of batches per group and the group mapping
+                model.ctc.ctc_loss.init_weights(
+                Path(args.train_data_path_and_name_and_type[0][0]).parent,
+                Path(args.valid_data_path_and_name_and_type[0][0]).parent
+            )
+
             if not args.use_matplotlib and args.num_att_plot != 0:
                 args.num_att_plot = 0
                 logging.info("--use_matplotlib false => Changing --num_att_plot to 0")
