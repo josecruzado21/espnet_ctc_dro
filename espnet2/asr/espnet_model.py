@@ -274,7 +274,7 @@ class ESPnetASRModel(AbsESPnetModel):
         if self.ctc_weight != 0.0:
             valid = kwargs.get("valid", None)
             loss_ctc, cer_ctc = self._calc_ctc_loss(
-                encoder_out, encoder_out_lens, text, text_lengths, utt_id = utt_id, return_lists = return_lists, groups = groups, group_dro_weights = group_dro_weights, valid =  valid
+                encoder_out, encoder_out_lens, text, text_lengths, utt_id = utt_id, return_lists = return_lists, groups = groups, groups_weights = group_dro_weights, valid =  valid
             )
             if isinstance(loss_ctc, tuple):
                 print("LOSS CTC >1: ", loss_ctc)
