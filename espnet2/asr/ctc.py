@@ -57,7 +57,7 @@ class CTC(torch.nn.Module):
             self.ctc_loss = DROCTCLoss()
 
         elif self.ctc_type == "droctc_og":
-            self.ctc_loss = DROCTCLoss(
+            self.ctc_loss = DROCTCLossOG(
                 reduction="none", 
                 zero_infinity=zero_infinity, 
                 dro_group_count=dro_group_count,
