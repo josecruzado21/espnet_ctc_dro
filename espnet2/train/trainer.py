@@ -984,20 +984,18 @@ class Trainer:
                 ctc_mov_min = torch.load(output_dir / "ctc_mov_min.pth")
                 
                 # Update CER moving avg/min
-                print("no updating CER mov min:")
                 cer_mov_avg = {k: (1 - beta_mov_avg) * cer_mov_avg[k] + beta_mov_avg * cer_dict[k] for k in cer_mov_avg}
                 torch.save(cer_mov_avg, output_dir / "cer_mov_avg.pth")
-                if continuous:
-                    print("Updating CER mov min:")
-                    cer_mov_min = {k: min(cer_mov_min[k], cer_mov_avg[k]) for k in cer_mov_min}
-                    torch.save(cer_mov_min, output_dir / "cer_mov_min.pth")
-                    print("Updating CTC mov min:")
-                    ctc_mov_min = {k: min(ctc_mov_min[k], ctc_mov_avg[k]) for k in ctc_mov_min}
-                    torch.save(ctc_mov_min, output_dir / "ctc_mov_min.pth")
-
                 # Updating CTC mov avg/min
                 ctc_mov_avg = {k: (1 - beta_mov_avg) * ctc_mov_avg[k] + beta_mov_avg * ctc_dict[k] for k in ctc_mov_avg}
                 torch.save(ctc_mov_avg, output_dir / "ctc_mov_avg.pth")
+                if continuous:
+                    print("Updating CER mov min...")
+                    cer_mov_min = {k: min(cer_mov_min[k], cer_mov_avg[k]) for k in cer_mov_min}
+                    torch.save(cer_mov_min, output_dir / "cer_mov_min.pth")
+                    print("Updating CTC mov min...")
+                    ctc_mov_min = {k: min(ctc_mov_min[k], ctc_mov_avg[k]) for k in ctc_mov_min}
+                    torch.save(ctc_mov_min, output_dir / "ctc_mov_min.pth")
 
             print(f"CER mov avg at epoch {current_epoch}", cer_mov_avg)
             print(f"CER mov min at epoch {current_epoch}", cer_mov_min)
