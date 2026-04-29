@@ -8,4 +8,3 @@ def set_all_random_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
     torch.random.manual_seed(seed)
-    torch.use_deterministic_algorithms(True)
