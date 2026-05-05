@@ -48,27 +48,7 @@ if [ -e activate_python.sh ]; then
     echo "Warning: activate_python.sh already exists. It will be overwritten"
 fi
 
-if [ ! -e "${output_dir}/etc/profile.d/conda.sh" ]; then
-    if [ ! -e "${script}" ]; then
-        # https://docs.conda.io/en/latest/miniconda.html
-        wget --tries=3 --no-check-certificate "https://repo.anaconda.com/miniconda/${script}"
-    fi
-    if "${is_windows}"; then
-        echo "Error: Miniconda installation is not supported for Windows for now."
-        exit 1
-        # https://conda.io/projects/conda/en/latest/user-guide/install/windows.html#installing-in-silent-mode
-        # shellcheck disable=SC2317
-        _output_dir="$(realpath ${output_dir} | tr / \\)"
-        # FIXME(kamo): hangup
-        # shellcheck disable=SC2317
-        ./"${script}" /InstallationType=JustMe /RegisterPython=0 /S /D="${_output_dir}"
-    else
-        bash "${script}" -b -p "${output_dir}"
-    fi
-fi
-
-# shellcheck disable=SC1090
-source "${output_dir}/etc/profile.d/conda.sh"
+eval "$(/share/data/willett-group/jcruzado/miniconda/bin/conda shell.bash hook)"
 conda deactivate
 
 # If the env already exists, skip recreation
@@ -91,5 +71,5 @@ cat << EOF > activate_python.sh
 if [ -z "\${PS1:-}" ]; then
     PS1=__dummy__
 fi
-. $(cd ${output_dir}; pwd)/etc/profile.d/conda.sh && conda deactivate && conda activate ${name}
+eval "\$(/share/data/willett-group/jcruzado/miniconda/bin/conda shell.bash hook)" && conda deactivate && conda activate ${name}
 EOF

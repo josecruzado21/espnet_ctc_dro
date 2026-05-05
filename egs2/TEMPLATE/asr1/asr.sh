@@ -296,6 +296,36 @@ fi
 . ./path.sh
 . ./cmd.sh
 
+##### Install sclite ########
+INSTALL_DIR=$(python3 -c "import espnet, os; print(os.path.join(os.path.dirname(espnet.__file__), 'tools', 'installers'))")
+
+check_sclite() {
+    if [ ! -f "$INSTALL_DIR/bin/sclite" ]; then
+        echo "sclite could not be found in $INSTALL_DIR. Installing SCTK..."
+        install_sctk
+    else
+        echo "sclite is already installed in $INSTALL_DIR."
+        export PATH="$INSTALL_DIR/bin:$PATH"
+    fi
+}
+
+install_sctk() {
+    mkdir -p "$INSTALL_DIR"
+    (
+        cd "$INSTALL_DIR" || exit
+        git clone https://github.com/usnistgov/SCTK.git .
+        make config
+        make all
+        make check
+        make install
+        make doc
+    )
+    export PATH="$INSTALL_DIR/bin:$PATH"
+    echo "SCTK installed successfully in $INSTALL_DIR."
+}
+
+check_sclite
+##### End of sclite installation ########
 
 # Check required arguments
 if ! "${skip_train}"; then

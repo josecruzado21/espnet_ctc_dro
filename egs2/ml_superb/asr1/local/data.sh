@@ -12,10 +12,13 @@ stage=0       # start from 0 if you need to start from data preparation
 stop_stage=100
 SECONDS=0
 nlsyms_txt=data/local/nlsyms.txt
-duration=10min # duration can be either 10min or 1h
+duration=1h # duration can be either 10min or 1h
 multilingual=true
-lid=false
+lid=true
 only_lid=false
+specific_languages=true
+selected_languages=eng,deu,heb,jpn,rus,spa
+datasets=voxforge,voxforge,fleurs,fleurs,fleurs,fleurs
 single_lang=eng # lang for single lang data preparation
                 # candidates: eng, deu, rus, pol, swe, jpn, cmn, sat, nob, xty
 
@@ -70,7 +73,10 @@ if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
             --duration ${duration} \
             --source ${MLSUPERB} \
             --lid ${lid} \
-            --only_lid ${only_lid}
+            --only_lid ${only_lid} \
+            --specific_languages ${specific_languages} \
+            --selected_languages ${selected_languages} \
+            --datasets ${datasets}
 
         for x in "train" "dev" "test"; do
             utils/utt2spk_to_spk2utt.pl \

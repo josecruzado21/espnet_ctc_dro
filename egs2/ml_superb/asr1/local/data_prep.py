@@ -207,9 +207,21 @@ if __name__ == "__main__":
     parser.add_argument("--lid", type=str2bool, default=False)
     parser.add_argument("--only_lid", type=str2bool, default=False)
     parser.add_argument("--max_wav_len", type=float, default=20.0)
+    parser.add_argument("--specific_languages", type=str2bool, default=False)
+    parser.add_argument("--selected_languages", type=str, default="")
+    parser.add_argument("--datasets", type=str, default="")
 
     args = parser.parse_args()
     assert args.duration in ["10min", "1h"], "we only "
+    if args.specific_languages:
+        selected_languages = [l.strip() for l in args.selected_languages.split(",")]
+        datasets = [d.strip() for d in args.datasets.split(",")]
+        assert len(selected_languages) == len(datasets), (
+            "selected_languages and datasets must have the same length"
+        )
+        lang_dataset_filter = dict(zip(selected_languages, datasets))
+    else:
+        lang_dataset_filter = None
 
     langs_info = {}
 
@@ -244,6 +256,9 @@ if __name__ == "__main__":
     for dataset in DATA:
         langs = os.listdir(os.path.join(args.source, dataset))
         for lang in langs:
+            if lang_dataset_filter is not None:
+                if lang not in lang_dataset_filter or lang_dataset_filter[lang] != dataset:
+                    continue
             reserve_flag = False
             if lang in RESERVE_LANG:
                 reserve_flag = True  # skip reserve lange for zero-shot

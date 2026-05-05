@@ -8,18 +8,19 @@ set -o pipefail
 # Process Pipeline
 stage=1
 stop_stage=13
-nj=32
-inference_nj=4
+nj=8
+inference_nj=1
 gpu_inference=true
+expdir=exp
 
 # Config
-duration=10min # duration set ("10min" or "1h")
+duration=1h # duration set ("10min" or "1h")
 only_lid=false # whether to perform only the LID task
 lid=false # whether to add joint LID task in multiligual ASR
 
 # Model/Inference Configs
 inference_config=conf/decode_asr.yaml
-asr_config=conf/tuning/train_asr_fbank_${duration}.yaml
+asr_config=conf/tuning/train_asr_s3prl_${duration}.yaml
 
 . utils/parse_options.sh || exit 1
 
@@ -48,6 +49,7 @@ local_data_opts+=" --multilingual true --nlsyms_txt ${nlsyms_txt}"
 
 ./asr.sh \
     --ngpu 1 \
+    --expdir ${expdir} \
     --stage ${stage} \
     --stop_stage ${stop_stage} \
     --nj ${nj} \
@@ -68,4 +70,4 @@ local_data_opts+=" --multilingual true --nlsyms_txt ${nlsyms_txt}"
     --test_sets "${test_set}" \
     --asr_tag "${asr_tag}" \
     --asr_stats_dir exp/asr_stats_multilingual_${duration} \
-    --local_score_opts "${lid} ${only_lid} normal"
+    --local_score_opts "${lid} ${only_lid} independent"

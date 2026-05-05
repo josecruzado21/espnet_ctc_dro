@@ -8,8 +8,8 @@ set -o pipefail
 # Process Pipeline
 stage=1
 stop_stage=13
-nj=32
-inference_nj=32
+nj=8
+inference_nj=1
 gpu_inference=false
 expdir=exp
 

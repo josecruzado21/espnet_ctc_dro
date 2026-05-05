@@ -181,7 +181,17 @@ def split_trn_by_rule(root, name, rule_fn, trn_path):
 def main(args):
     roots = []
     if not ONLY_LID:  # TER will be parsed from trn and using sclite as the usual case
-        for txt_path in glob.glob(f"{args.dir}/*/*/score_cer/result.txt"):
+        # dev sets live under org/<split>/ (3 levels), test sets are direct (2 levels)
+        seen = set()
+        for pattern in [
+            f"{args.dir}/*/*/*/score_cer/result.txt",
+            f"{args.dir}/*/*/score_cer/result.txt",
+        ]:
+            for txt_path in glob.glob(pattern):
+                if txt_path not in seen:
+                    seen.add(txt_path)
+                    roots.append(os.path.dirname(txt_path))
+        for txt_path in glob.glob(f"{args.dir}/*/*/*/score_wer/result.txt"):
             roots.append(os.path.dirname(txt_path))
         for txt_path in glob.glob(f"{args.dir}/*/*/score_wer/result.txt"):
             roots.append(os.path.dirname(txt_path))

@@ -76,6 +76,7 @@ class CTC(torch.nn.Module):
         if self.ctc_type == "builtin" or self.ctc_type == "brctc":
             th_pred = th_pred.log_softmax(2).float()
             loss = self.ctc_loss(th_pred, th_target, th_ilen, th_olen)
+            print(loss)
             if self.ctc_type == "builtin":
                 size = th_pred.size(1)
             else:
