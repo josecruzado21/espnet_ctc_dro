@@ -659,12 +659,15 @@ class Trainer:
                 scaler is not None,
                 **autocast_args,
             ):
+                skip_batch = False
                 with reporter.measure_time("forward_time"):
                     try:
                         retval = model(**batch, valid=False, group_dro_weights = group_dro_weights)
                     except SkipBatchException:
-                        reporter.next()
-                        continue
+                        skip_batch = True
+                if skip_batch:
+                    reporter.next()
+                    continue
 
                     # Note(kamo):
                     # Supporting two patterns for the returned value from the model
@@ -910,9 +913,12 @@ class Trainer:
                 options.use_amp,
                 **autocast_args,
             ):
+                skip_batch = False
                 try:
                     retval = model(**batch, valid=True)
                 except SkipBatchException:
+                    skip_batch = True
+                if skip_batch:
                     reporter.next()
                     continue
 
