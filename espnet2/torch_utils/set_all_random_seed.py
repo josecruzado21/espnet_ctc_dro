@@ -1,3 +1,4 @@
+import os
 import random
 
 import numpy as np
@@ -8,6 +9,7 @@ def set_all_random_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
     torch.random.manual_seed(seed)
-    # torch.use_deterministic_algorithms(True)
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
