@@ -1683,6 +1683,7 @@ class AbsTask(ABC):
                     cls.trainer = DeepSpeedTrainer
                     distributed_option.init_deepspeed()
 
+            set_all_random_seed(args.seed)
             trainer_options = cls.trainer.build_options(args)
             cls.trainer.run(
                 model=model,
