@@ -98,27 +98,27 @@ class CTC(torch.nn.Module):
     def loss_fn(self, th_pred, th_target, th_ilen, th_olen, utt_id=None, groups=None, groups_weights=None, valid=False) -> torch.Tensor:
         # --- cuDNN CTC eligibility check + fix (applies to all loss types) ---
         th_target = th_target.to(dtype=torch.int32, device="cpu")
-        max_T = th_pred.size(0)
-        all_full_length = (th_ilen == max_T).all().item()
-        print(f"[CTC DEBUG] log_probs shape (T,B,C): {tuple(th_pred.shape)}, dtype: {th_pred.dtype}, device: {th_pred.device}")
-        print(f"[CTC DEBUG] targets shape: {tuple(th_target.shape)}, dtype: {th_target.dtype}, device: {th_target.device}, contiguous: {th_target.is_contiguous()}")
-        print(f"[CTC DEBUG] input_lengths: {th_ilen.tolist()}")
-        print(f"[CTC DEBUG] target_lengths: {th_olen.tolist()}")
-        print(f"[CTC DEBUG] max_T: {max_T}  |  all input_lengths == max_T: {all_full_length}")
-        print(f"[CTC DEBUG] all target_lengths < 256: {(th_olen < 256).all().item()}")
-        print(f"[CTC DEBUG] all target_lengths <= input_lengths: {(th_olen <= th_ilen).all().item()}")
-        cudnn_eligible = (
-            th_pred.is_floating_point() and  # will be cast to float32 before loss call
-            th_target.dtype == torch.int32 and
-            str(th_target.device) == "cpu" and
-            th_target.is_contiguous() and
-            th_pred.device.type == "cuda" and
-            all_full_length and
-            (th_olen < 256).all().item() and
-            (th_olen <= th_ilen).all().item()
-        )
-        print(f"[CTC DEBUG] => cuDNN CTC will be used: {cudnn_eligible}")
-        print(f"[CTC DEBUG] cudnn.deterministic: {torch.backends.cudnn.deterministic}  |  cudnn.benchmark: {torch.backends.cudnn.benchmark}")
+        # max_T = th_pred.size(0)
+        # all_full_length = (th_ilen == max_T).all().item()
+        # print(f"[CTC DEBUG] log_probs shape (T,B,C): {tuple(th_pred.shape)}, dtype: {th_pred.dtype}, device: {th_pred.device}")
+        # print(f"[CTC DEBUG] targets shape: {tuple(th_target.shape)}, dtype: {th_target.dtype}, device: {th_target.device}, contiguous: {th_target.is_contiguous()}")
+        # print(f"[CTC DEBUG] input_lengths: {th_ilen.tolist()}")
+        # print(f"[CTC DEBUG] target_lengths: {th_olen.tolist()}")
+        # print(f"[CTC DEBUG] max_T: {max_T}  |  all input_lengths == max_T: {all_full_length}")
+        # print(f"[CTC DEBUG] all target_lengths < 256: {(th_olen < 256).all().item()}")
+        # print(f"[CTC DEBUG] all target_lengths <= input_lengths: {(th_olen <= th_ilen).all().item()}")
+        # cudnn_eligible = (
+        #     th_pred.is_floating_point() and  # will be cast to float32 before loss call
+        #     th_target.dtype == torch.int32 and
+        #     str(th_target.device) == "cpu" and
+        #     th_target.is_contiguous() and
+        #     th_pred.device.type == "cuda" and
+        #     all_full_length and
+        #     (th_olen < 256).all().item() and
+        #     (th_olen <= th_ilen).all().item()
+        # )
+        # print(f"[CTC DEBUG] => cuDNN CTC will be used: {cudnn_eligible}")
+        # print(f"[CTC DEBUG] cudnn.deterministic: {torch.backends.cudnn.deterministic}  |  cudnn.benchmark: {torch.backends.cudnn.benchmark}")
         # --- end debug (remove after confirming) ---
 
         if self.ctc_type == "builtin" or self.ctc_type == "brctc" or self.ctc_type == 'droctc' or self.ctc_type == "droctc_og":
