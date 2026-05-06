@@ -18,7 +18,6 @@ from packaging.version import parse as V
 from typeguard import typechecked
 import math
 
-from espnet2.asr.ctc import SkipBatchException
 from espnet2.iterators.abs_iter_factory import AbsIterFactory
 from espnet2.main_funcs.average_nbest_models import average_nbest_models
 from espnet2.main_funcs.calculate_all_attentions import calculate_all_attentions
@@ -655,18 +654,12 @@ class Trainer:
                         )
                 del _model
 
-            skip_batch = False
             with autocast(
                 scaler is not None,
                 **autocast_args,
             ):
                 with reporter.measure_time("forward_time"):
-                    try:
-                        retval = model(**batch, valid=False, group_dro_weights = group_dro_weights)
-                    except SkipBatchException:
-                        skip_batch = True
-
-                if not skip_batch:
+                    retval = model(**batch, valid=False, group_dro_weights = group_dro_weights)
                     # Note(kamo):
                     # Supporting two patterns for the returned value from the model
                     #   a. dict type
@@ -704,26 +697,22 @@ class Trainer:
 
                     retval = None
 
-                    stats = {k: v for k, v in stats.items() if v is not None}
-                    if ngpu > 1 or distributed:
-                        # Apply weighted averaging for loss and stats
-                        loss = (loss * weight.type(loss.dtype)).sum()
+                stats = {k: v for k, v in stats.items() if v is not None}
+                if ngpu > 1 or distributed:
+                    # Apply weighted averaging for loss and stats
+                    loss = (loss * weight.type(loss.dtype)).sum()
 
-                        # if distributed, this method can also apply all_reduce()
-                        stats, weight = recursive_average(stats, weight, distributed)
+                    # if distributed, this method can also apply all_reduce()
+                    stats, weight = recursive_average(stats, weight, distributed)
 
-                        # Now weight is summation over all workers
-                        loss /= weight
-                    if distributed:
-                        # NOTE(kamo): Multiply world_size because DistributedDataParallel
-                        # automatically normalizes the gradient by world_size.
-                        loss *= torch.distributed.get_world_size()
+                    # Now weight is summation over all workers
+                    loss /= weight
+                if distributed:
+                    # NOTE(kamo): Multiply world_size because DistributedDataParallel
+                    # automatically normalizes the gradient by world_size.
+                    loss *= torch.distributed.get_world_size()
 
-                    loss /= accum_grad
-
-            if skip_batch:
-                reporter.next()
-                continue
+                loss /= accum_grad
 
             reporter.register(stats, weight)
 
@@ -915,14 +904,7 @@ class Trainer:
                 options.use_amp,
                 **autocast_args,
             ):
-                skip_batch = False
-                try:
-                    retval = model(**batch, valid=True)
-                except SkipBatchException:
-                    skip_batch = True
-                if skip_batch:
-                    reporter.next()
-                    continue
+                retval = model(**batch, valid=True)
 
             if isinstance(retval, dict):
                 stats = retval["stats"]
