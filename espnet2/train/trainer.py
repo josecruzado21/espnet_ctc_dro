@@ -663,6 +663,7 @@ class Trainer:
                     try:
                         retval = model(**batch, valid=False, group_dro_weights = group_dro_weights)
                     except SkipBatchException:
+                        reporter.next()
                         continue
 
                     # Note(kamo):
@@ -912,6 +913,7 @@ class Trainer:
                 try:
                     retval = model(**batch, valid=True)
                 except SkipBatchException:
+                    reporter.next()
                     continue
 
             if isinstance(retval, dict):
