@@ -108,7 +108,7 @@ class CTC(torch.nn.Module):
         print(f"[CTC DEBUG] all target_lengths < 256: {(th_olen < 256).all().item()}")
         print(f"[CTC DEBUG] all target_lengths <= input_lengths: {(th_olen <= th_ilen).all().item()}")
         cudnn_eligible = (
-            th_pred.dtype == torch.float32 and
+            th_pred.is_floating_point() and  # will be cast to float32 before loss call
             th_target.dtype == torch.int32 and
             str(th_target.device) == "cpu" and
             th_target.is_contiguous() and
