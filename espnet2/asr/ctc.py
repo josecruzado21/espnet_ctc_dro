@@ -125,6 +125,7 @@ class CTC(torch.nn.Module):
 
         if self.ctc_type == "builtin" or self.ctc_type == "brctc" or self.ctc_type == 'droctc' or self.ctc_type == "droctc_og":
             th_pred = th_pred.log_softmax(2).float()
+            th_ilen = torch.full_like(th_ilen, th_pred.size(0))
             if self.ctc_type == "droctc":
                 loss = self.ctc_loss(th_pred, th_target, th_ilen, th_olen, groups, groups_weights, valid)
                 # When valid we do not aggregate so we return the list of losses per group
