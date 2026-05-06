@@ -7,10 +7,6 @@ from typeguard import typechecked
 from .dro_ctc import DROCTCLoss, DROCTCLossOG
 
 
-class SkipBatchException(Exception):
-    pass
-
-
 class CTC(torch.nn.Module):
     """CTC module.
 
@@ -125,8 +121,7 @@ class CTC(torch.nn.Module):
         print(f"[CTC DEBUG] => cuDNN CTC will be used: {cudnn_eligible}")
         print(f"[CTC DEBUG] cudnn.deterministic: {torch.backends.cudnn.deterministic}  |  cudnn.benchmark: {torch.backends.cudnn.benchmark}")
         if not cudnn_eligible:
-            logging.warning("[CTC] Batch not cuDNN-eligible, skipping.")
-            raise SkipBatchException("not cuDNN eligible")
+            print("[CTC] Batch not cuDNN-eligible, skipping.")
 
         if self.ctc_type == "builtin" or self.ctc_type == "brctc" or self.ctc_type == 'droctc' or self.ctc_type == "droctc_og":
             th_pred = th_pred.log_softmax(2).float()
