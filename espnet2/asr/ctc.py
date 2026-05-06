@@ -118,6 +118,7 @@ class CTC(torch.nn.Module):
             (th_olen <= th_ilen).all().item()
         )
         print(f"[CTC DEBUG] => cuDNN CTC will be used: {cudnn_eligible}")
+        print(f"[CTC DEBUG] cudnn.deterministic: {torch.backends.cudnn.deterministic}  |  cudnn.benchmark: {torch.backends.cudnn.benchmark}")
         # --- end debug (remove after confirming) ---
 
         if self.ctc_type == "builtin" or self.ctc_type == "brctc" or self.ctc_type == 'droctc' or self.ctc_type == "droctc_og":
