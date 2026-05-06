@@ -4,7 +4,7 @@ import torch
 
 from espnet.nets.pytorch_backend.nets_utils import pad_list
 
-DEFAULT_TIME_WARP_MODE = "bilinear"
+DEFAULT_TIME_WARP_MODE = "bicubic"
 
 
 def time_warp(x: torch.Tensor, window: int = 80, mode: str = DEFAULT_TIME_WARP_MODE):
