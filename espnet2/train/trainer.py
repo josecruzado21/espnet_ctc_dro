@@ -655,20 +655,18 @@ class Trainer:
                         )
                 del _model
 
+            skip_batch = False
             with autocast(
                 scaler is not None,
                 **autocast_args,
             ):
-                skip_batch = False
                 with reporter.measure_time("forward_time"):
                     try:
                         retval = model(**batch, valid=False, group_dro_weights = group_dro_weights)
                     except SkipBatchException:
                         skip_batch = True
-                if skip_batch:
-                    reporter.next()
-                    continue
 
+                if not skip_batch:
                     # Note(kamo):
                     # Supporting two patterns for the returned value from the model
                     #   a. dict type
@@ -706,22 +704,26 @@ class Trainer:
 
                     retval = None
 
-                stats = {k: v for k, v in stats.items() if v is not None}
-                if ngpu > 1 or distributed:
-                    # Apply weighted averaging for loss and stats
-                    loss = (loss * weight.type(loss.dtype)).sum()
+                    stats = {k: v for k, v in stats.items() if v is not None}
+                    if ngpu > 1 or distributed:
+                        # Apply weighted averaging for loss and stats
+                        loss = (loss * weight.type(loss.dtype)).sum()
 
-                    # if distributed, this method can also apply all_reduce()
-                    stats, weight = recursive_average(stats, weight, distributed)
+                        # if distributed, this method can also apply all_reduce()
+                        stats, weight = recursive_average(stats, weight, distributed)
 
-                    # Now weight is summation over all workers
-                    loss /= weight
-                if distributed:
-                    # NOTE(kamo): Multiply world_size because DistributedDataParallel
-                    # automatically normalizes the gradient by world_size.
-                    loss *= torch.distributed.get_world_size()
+                        # Now weight is summation over all workers
+                        loss /= weight
+                    if distributed:
+                        # NOTE(kamo): Multiply world_size because DistributedDataParallel
+                        # automatically normalizes the gradient by world_size.
+                        loss *= torch.distributed.get_world_size()
 
-                loss /= accum_grad
+                    loss /= accum_grad
+
+            if skip_batch:
+                reporter.next()
+                continue
 
             reporter.register(stats, weight)
 
