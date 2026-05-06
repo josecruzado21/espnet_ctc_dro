@@ -746,6 +746,11 @@ class Trainer:
                         scale_factor=0.55,
                     )
 
+                # determinism debug
+                param_vec = torch.nn.utils.parameters_to_vector(model.parameters())
+                grad_vec = torch.cat([p.grad.flatten() for p in model.parameters() if p.grad is not None])
+                print(f"[DET DEBUG] before step — param_sum: {param_vec.sum().item():.6f}  grad_sum: {grad_vec.sum().item():.6f}")
+
                 # compute the gradient norm to check if it is normal or not
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     model.parameters(),
