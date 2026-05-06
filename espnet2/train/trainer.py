@@ -18,6 +18,7 @@ from packaging.version import parse as V
 from typeguard import typechecked
 import math
 
+from espnet2.asr.ctc import SkipBatchException
 from espnet2.iterators.abs_iter_factory import AbsIterFactory
 from espnet2.main_funcs.average_nbest_models import average_nbest_models
 from espnet2.main_funcs.calculate_all_attentions import calculate_all_attentions
@@ -659,7 +660,10 @@ class Trainer:
                 **autocast_args,
             ):
                 with reporter.measure_time("forward_time"):
-                    retval = model(**batch, valid=False, group_dro_weights = group_dro_weights)
+                    try:
+                        retval = model(**batch, valid=False, group_dro_weights = group_dro_weights)
+                    except SkipBatchException:
+                        continue
 
                     # Note(kamo):
                     # Supporting two patterns for the returned value from the model
@@ -905,7 +909,10 @@ class Trainer:
                 options.use_amp,
                 **autocast_args,
             ):
-                retval = model(**batch, valid=True)
+                try:
+                    retval = model(**batch, valid=True)
+                except SkipBatchException:
+                    continue
 
             if isinstance(retval, dict):
                 stats = retval["stats"]

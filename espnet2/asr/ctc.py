@@ -7,6 +7,10 @@ from typeguard import typechecked
 from .dro_ctc import DROCTCLoss, DROCTCLossOG
 
 
+class SkipBatchException(Exception):
+    pass
+
+
 class CTC(torch.nn.Module):
     """CTC module.
 
@@ -96,7 +100,6 @@ class CTC(torch.nn.Module):
         self.reduce = reduce
 
     def loss_fn(self, th_pred, th_target, th_ilen, th_olen, utt_id=None, groups=None, groups_weights=None, valid=False) -> torch.Tensor:
-        # --- cuDNN CTC eligibility check + fix (applies to all loss types) ---
         th_target = th_target.to(dtype=torch.int32, device="cpu")
         max_T = th_pred.size(0)
         all_full_length = (th_ilen == max_T).all().item()
@@ -110,7 +113,7 @@ class CTC(torch.nn.Module):
         print(f"[CTC DEBUG] all target_lengths < 256: {(th_olen < 256).all().item()}")
         print(f"[CTC DEBUG] all target_lengths <= input_lengths: {(th_olen <= th_ilen).all().item()}")
         cudnn_eligible = (
-            th_pred.is_floating_point() and  # will be cast to float32 before loss call
+            th_pred.is_floating_point() and
             th_target.dtype == torch.int32 and
             str(th_target.device) == "cpu" and
             th_target.is_contiguous() and
@@ -121,7 +124,9 @@ class CTC(torch.nn.Module):
         )
         print(f"[CTC DEBUG] => cuDNN CTC will be used: {cudnn_eligible}")
         print(f"[CTC DEBUG] cudnn.deterministic: {torch.backends.cudnn.deterministic}  |  cudnn.benchmark: {torch.backends.cudnn.benchmark}")
-        # --- end debug (remove after confirming) ---
+        if not cudnn_eligible:
+            logging.warning("[CTC] Batch not cuDNN-eligible, skipping.")
+            raise SkipBatchException("not cuDNN eligible")
 
         if self.ctc_type == "builtin" or self.ctc_type == "brctc" or self.ctc_type == 'droctc' or self.ctc_type == "droctc_og":
             th_pred = th_pred.log_softmax(2).float()
