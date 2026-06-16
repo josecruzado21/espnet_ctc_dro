@@ -1906,15 +1906,17 @@ class AbsTask(ABC):
         utt2category_file = (
             Path(iter_options.data_path_and_name_and_type[0][0]).parent / "utt2category"
         )
-        if utt2category_file.exists():
+        if utt2category_file.exists() and utt2category_file.stat().st_size > 0:
             utt2category_file = str(utt2category_file)
             logging.warning("Reading " + utt2category_file)
         else:
             base_path = Path(iter_options.data_path_and_name_and_type[0][0]).parent
-            with open(base_path / "utt2spk") as f, open(base_path / "utt2category", "w") as out:
+            tmp_file = base_path / f"utt2category.tmp.{os.getpid()}"
+            with open(base_path / "utt2spk") as f, open(tmp_file, "w") as out:
                 for line in f:
                     utt = line.split()[0]
                     out.write(f"{utt} {utt.split('_')[1]}\n")
+            tmp_file.rename(base_path / "utt2category")
             utt2category_file = str(base_path / "utt2category")
         batch_sampler = build_batch_sampler(
             type=iter_options.batch_type,
