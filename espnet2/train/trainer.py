@@ -114,6 +114,28 @@ class TrainerOptions:
     continuous: bool
 
 
+def _get_current_dro_weights(model, group_dro_weights):
+    """Return current DRO weights as {lang: float}, regardless of ctc_type.
+
+    For droctc_og: reads dro_q from the loss module (updated every batch).
+    For builtin/droctc: returns the epoch-level group_dro_weights (unchanged
+    within an epoch).
+    """
+    actual_model = model.module if hasattr(model, "module") else model
+    ctc_loss = getattr(getattr(actual_model, "ctc", None), "ctc_loss", None)
+    if (
+        ctc_loss is not None
+        and hasattr(ctc_loss, "dro_q")
+        and ctc_loss.group_id_to_ix
+    ):
+        ix_to_group = {v: k for k, v in ctc_loss.group_id_to_ix.items()}
+        return {
+            ix_to_group[i]: float(ctc_loss.dro_q[i])
+            for i in range(len(ctc_loss.group_id_to_ix))
+        }
+    return {k: float(v) for k, v in group_dro_weights.items()}
+
+
 class Trainer:
     """Trainer having a optimizer.
 
@@ -351,6 +373,7 @@ class Trainer:
 
             reporter.set_epoch(iepoch)
             # 1. Train and validation for one-epoch
+            _epoch_train_start = time.perf_counter()
             torch.cuda.empty_cache()
             with reporter.observe("train") as sub_reporter:
                 all_steps_are_invalid = cls.train_one_epoch(
@@ -362,9 +385,10 @@ class Trainer:
                     scaler=scaler,
                     summary_writer=train_summary_writer,
                     options=trainer_options,
-                    distributed_option=distributed_option,    
-                    output_dir = output_dir     
+                    distributed_option=distributed_option,
+                    output_dir = output_dir
                 )
+            _epoch_train_end = time.perf_counter()
 
             torch.cuda.empty_cache()
             with reporter.observe("valid") as sub_reporter:
@@ -377,6 +401,7 @@ class Trainer:
                     output_dir = output_dir,
                     update_weights = update_weights
                 )
+            _epoch_valid_end = time.perf_counter()
 
             torch.cuda.empty_cache()
             if not distributed_option.distributed or distributed_option.dist_rank == 0:
@@ -451,7 +476,16 @@ class Trainer:
                     output_dir / "checkpoint.pth",
                 )
 
-                # 5. Save and log the model and update the link to the best model
+                # 5. Save epoch timing history
+                _time_history_path = output_dir / "epoch_time_history.pth"
+                _time_history = torch.load(_time_history_path) if _time_history_path.exists() else []
+                _time_history.append({
+                    "train_seconds": _epoch_train_end - _epoch_train_start,
+                    "valid_seconds": _epoch_valid_end - _epoch_train_end,
+                })
+                torch.save(_time_history, _time_history_path)
+
+                # 6. Save and log the model and update the link to the best model
                 torch.save(model_state_dict, output_dir / f"{iepoch}epoch.pth")
 
                 # Creates a sym link latest.pth -> {iepoch}epoch.pth
@@ -587,6 +621,12 @@ class Trainer:
         distributed = distributed_option.distributed
 
         group_dro_weights = torch.load(output_dir / "group_dro_weights.pth")
+
+        batch_weight_history_path = output_dir / "batch_weight_history.pth"
+        if batch_weight_history_path.exists():
+            batch_weight_history = torch.load(batch_weight_history_path, map_location="cpu", weights_only=False)
+        else:
+            batch_weight_history = []
 
         if log_interval is None:
             try:
@@ -823,6 +863,7 @@ class Trainer:
                     ),
                 )
                 start_time = time.perf_counter()
+                batch_weight_history.append(_get_current_dro_weights(model, group_dro_weights))
 
             # NOTE(kamo): Call log_message() after next()
             reporter.next()
@@ -837,6 +878,7 @@ class Trainer:
             if distributed:
                 iterator_stop.fill_(1)
                 torch.distributed.all_reduce(iterator_stop, ReduceOp.SUM)
+        torch.save(batch_weight_history, batch_weight_history_path)
         return all_steps_are_invalid
 
     @classmethod
