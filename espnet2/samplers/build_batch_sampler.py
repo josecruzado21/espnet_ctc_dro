@@ -15,6 +15,7 @@ from espnet2.samplers.num_elements_batch_sampler import NumElementsBatchSampler
 from espnet2.samplers.sorted_batch_sampler import SortedBatchSampler
 from espnet2.samplers.unsorted_batch_sampler import UnsortedBatchSampler
 from espnet2.samplers.duration_language_batch_sampler import DurationLanguageBatchSampler
+from espnet2.samplers.duration_batch_sampler import DurationBatchSampler
 
 BATCH_TYPES = dict(
     unsorted="UnsortedBatchSampler has nothing in particular feature and "
@@ -73,7 +74,8 @@ BATCH_TYPES = dict(
     "    utterance_id_a 1000,80\n"
     "    utterance_id_b 1453,80\n"
     "    utterance_id_c 1241,80\n",
-    duration_language="DurationLanguageBatchSampler"
+    duration_language="DurationLanguageBatchSampler",
+    duration="DurationBatchSampler: duration-equalized batches with mixed languages",
 )
 
 CATEGORY_BATCH_TYPES = dict(
@@ -177,6 +179,14 @@ def build_batch_sampler(
         )
     elif type == "duration_language":
         retval = DurationLanguageBatchSampler(
+            batch_size=batch_size,
+            shape_files=shape_files,
+            drop_last=drop_last,
+            utt2category_file=utt2category_file,
+            duration_batch_length=duration_batch_length,
+        )
+    elif type == "duration":
+        retval = DurationBatchSampler(
             batch_size=batch_size,
             shape_files=shape_files,
             drop_last=drop_last,
