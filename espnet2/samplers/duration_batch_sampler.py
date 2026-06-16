@@ -82,6 +82,14 @@ class DurationBatchSampler(AbsSampler):
 
         random.shuffle(batches)
         self.batch_list = batches
+        if utt2category_file is not None:
+            groups = set()
+            with open(utt2category_file, "r") as f:
+                for line in f:
+                    _, group = line.strip().split()
+                    groups.add(group)
+            groups = list(groups)
+            self.groups = groups
 
     def __repr__(self):
         return (
