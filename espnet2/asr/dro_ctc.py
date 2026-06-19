@@ -52,7 +52,7 @@ class DROCTCLossOG(torch.nn.Module):
         self.dro_group_count = dro_group_count
         self.dro_step_size = dro_step_size
 
-        self.dro_q = torch.ones(self.dro_group_count) * 1.0/self.dro_group_count
+        self.register_buffer('dro_q', torch.ones(self.dro_group_count) * 1.0/self.dro_group_count)
         self.dro_q_epsilon = dro_q_epsilon
         self.group_id_to_ix = {}
         self.agg = agg

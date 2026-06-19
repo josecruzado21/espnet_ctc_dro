@@ -233,8 +233,12 @@ class Trainer:
         output_dir = Path(trainer_options.output_dir)
 
         train_groups = train_iter_factory.groups
-        group_dro_weights = {k: 1/len(train_groups) for k in train_groups}
-        torch.save(group_dro_weights, output_dir / "group_dro_weights.pth")
+        resuming = trainer_options.resume and (output_dir / "checkpoint.pth").exists()
+        if resuming and (output_dir / "group_dro_weights.pth").exists():
+            group_dro_weights = torch.load(output_dir / "group_dro_weights.pth")
+        else:
+            group_dro_weights = {k: 1/len(train_groups) for k in train_groups}
+            torch.save(group_dro_weights, output_dir / "group_dro_weights.pth")
 
         reporter = Reporter()
         if trainer_options.use_amp:
@@ -264,8 +268,7 @@ class Trainer:
                 print("Please install S3PRL: cd ${MAIN_ROOT}/tools && make s3prl.done")
                 raise RuntimeError("Requiring S3PRL. ")
 
-        if trainer_options.resume and (output_dir / "checkpoint.pth").exists():
-            group_dro_weights = torch.load(output_dir / "group_dro_weights.pth")
+        if resuming:
             cls.resume(
                 checkpoint=output_dir / "checkpoint.pth",
                 model=model,
