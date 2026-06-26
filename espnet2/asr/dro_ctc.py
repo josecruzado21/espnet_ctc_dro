@@ -193,3 +193,146 @@ class DROCTCLossOG(torch.nn.Module):
         print("normalized dro_q:")
         for group_id, group_ix in self.group_id_to_ix.items():
             print(f"q[group#{group_id}]= {self.dro_q[group_ix].item()}")
+
+
+class DROOGLoss(torch.nn.Module):
+    """DRO loss identical to DROCTCLossOG but updates group weights using CER
+    (greedy-decoded edit distance / reference length) instead of CTC loss.
+    The returned loss is still weighted CTC, so backprop is unchanged.
+    """
+    def __init__(self, blank=0, reduction='mean', zero_infinity=False, dro_group_count=0,
+                 dro_step_size=0.01, dro_q_epsilon=1e-10, accumulation=False, smoothing=0,
+                 agg="sum", normalize_grad=True):
+        super().__init__()
+        self.blank = blank
+        self.reduction = reduction
+        self.zero_infinity = zero_infinity
+        self.dro_group_count = dro_group_count
+        self.dro_step_size = dro_step_size
+        self.register_buffer('dro_q', torch.ones(self.dro_group_count) * 1.0 / self.dro_group_count)
+        self.dro_q_epsilon = dro_q_epsilon
+        self.group_id_to_ix = {}
+        self.agg = agg
+        self.normalize_grad = normalize_grad
+        self.accumulation = accumulation
+        self.smoothing = smoothing
+
+    def init_weights(self, train_file, valid_file):
+        self.utt2category = {}
+        with open(str(train_file) + '/utt2category', 'r') as f:
+            for line in f:
+                line = line.strip().split()
+                self.utt2category[line[0]] = line[1]
+        with open(str(valid_file) + '/utt2category', 'r') as f:
+            for line in f:
+                line = line.strip().split()
+                self.utt2category[line[0]] = line[1]
+        if self.accumulation:
+            self.group_losses = {i: [] for i in range(self.dro_group_count)}
+
+    def _ctc_greedy_decode(self, log_probs, input_lengths):
+        """Greedy CTC decode. log_probs: (T, B, V). Returns list of B token-id lists."""
+        pred_ids = log_probs.argmax(dim=-1)  # (T, B)
+        decoded = []
+        for b in range(pred_ids.shape[1]):
+            length = input_lengths[b].item()
+            seq = pred_ids[:length, b].tolist()
+            collapsed = []
+            for tok in seq:
+                if not collapsed or tok != collapsed[-1]:
+                    collapsed.append(tok)
+            decoded.append([tok for tok in collapsed if tok != self.blank])
+        return decoded
+
+    def _compute_cer(self, decoded, targets, target_lengths):
+        """Returns (edit_distances, ref_lengths) per sample — raw counts, not normalized."""
+        import editdistance
+        edit_distances = []
+        ref_lengths = []
+        for b in range(len(decoded)):
+            tlen = target_lengths[b].item()
+            if targets.dim() == 2:
+                ref = targets[b, :tlen].tolist()
+            else:
+                offset = int(target_lengths[:b].sum())
+                ref = targets[offset:offset + tlen].tolist()
+            hyp = decoded[b]
+            edit_distances.append(editdistance.eval(hyp, ref))
+            ref_lengths.append(max(len(ref), 1))
+        return edit_distances, ref_lengths
+
+    def forward(self, log_probs: Tensor, targets: Tensor, input_lengths: Tensor,
+                target_lengths: Tensor, utt_id: List[str], valid: bool = True) -> Tensor:
+        log_probs = torch.transpose(log_probs, 0, 1)  # (T, B, V)
+
+        batch_lang_ids = [self.utt2category[_] for _ in utt_id]
+        batch_lang_q_indices = []
+        for lang_id in batch_lang_ids:
+            if lang_id not in self.group_id_to_ix:
+                self.group_id_to_ix[lang_id] = len(self.group_id_to_ix)
+            batch_lang_q_indices.append(self.group_id_to_ix[lang_id])
+
+        losses = F.ctc_loss(
+            log_probs, targets, input_lengths, target_lengths,
+            self.blank, reduction='none', zero_infinity=self.zero_infinity
+        )
+
+        if not valid:
+            decoded = self._ctc_greedy_decode(log_probs.detach(), input_lengths)
+            edit_distances, ref_lengths = self._compute_cer(decoded, targets.cpu(), target_lengths.cpu())
+
+            for q_ix in set(batch_lang_q_indices):
+                # corpus-level CER: sum(edit_distances) / sum(ref_lengths)
+                # weights each utterance by its length, so short utterances don't dominate
+                group_eds = sum(edit_distances[i] for i in range(len(edit_distances)) if batch_lang_q_indices[i] == q_ix)
+                group_lens = sum(ref_lengths[i] for i in range(len(ref_lengths)) if batch_lang_q_indices[i] == q_ix)
+                group_cer_signal = torch.tensor(group_eds / group_lens, dtype=torch.float32)
+
+                if not self.accumulation:
+                    if self.smoothing > 0:
+                        self.dro_q[q_ix] *= torch.exp(
+                            (group_cer_signal * self.dro_step_size) / (self.dro_q[q_ix] + self.smoothing)
+                        )
+                    else:
+                        self.dro_q[q_ix] *= torch.exp(group_cer_signal * self.dro_step_size)
+                else:
+                    self.group_losses[q_ix].append(group_cer_signal)
+
+            if self.accumulation:
+                if all(len(self.group_losses[_]) > 0 for _ in self.group_losses):
+                    for _ in self.group_losses:
+                        update_term = sum(self.group_losses[_]) / len(self.group_losses[_])
+                        if self.smoothing > 0:
+                            self.dro_q[_] *= torch.exp(
+                                (update_term * self.dro_step_size) / (self.dro_q[_] + self.smoothing)
+                            )
+                        else:
+                            self.dro_q[_] *= torch.exp(update_term * self.dro_step_size)
+                    self.normalize_dro_q()
+                    for _ in self.group_losses:
+                        self.group_losses[_] = []
+            else:
+                self.normalize_dro_q()
+
+        if self.normalize_grad:
+            dro_losses = torch.stack([
+                losses[ix] * self.dro_q[batch_lang_q_indices[ix]] * self.dro_group_count
+                for ix in range(losses.shape[0])
+            ])
+        else:
+            dro_losses = torch.stack([
+                losses[ix] * self.dro_q[batch_lang_q_indices[ix]]
+                for ix in range(losses.shape[0])
+            ])
+
+        if not valid:
+            return dro_losses
+        else:
+            return losses
+
+    def normalize_dro_q(self):
+        self.dro_q += self.dro_q_epsilon
+        self.dro_q = self.dro_q / self.dro_q.sum()
+        print("normalized dro_q:")
+        for group_id, group_ix in self.group_id_to_ix.items():
+            print(f"q[group#{group_id}]= {self.dro_q[group_ix].item()}")

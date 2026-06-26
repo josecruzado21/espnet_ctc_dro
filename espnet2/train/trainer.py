@@ -357,7 +357,10 @@ class Trainer:
 
         start_time = time.perf_counter()
         for iepoch in range(start_epoch, trainer_options.max_epoch + 1):
-            update_weights = (iepoch >= warmup_epochs)
+            if trainer_options.metric_for_update == "cer_direct":
+                update_weights = (output_dir / "cer_mov_avg.pth").exists()
+            else:
+                update_weights = (iepoch >= warmup_epochs)
             if iepoch != start_epoch:
                 logging.info(
                     "{}/{}epoch started. Estimated time to finish: {}".format(
@@ -993,8 +996,20 @@ class Trainer:
                 cer_dict[k] = cer_lang
                 if "sum_ctc" in v:
                     ctc_dict[k] = v["sum_ctc"] / v["count_samples"]
+            total_edits = sum(v["sum_edit_distances"] for v in group_stats.values())
+            total_refs = sum(v["sum_ref_lengths"] for v in group_stats.values())
+            total_cer = total_edits / total_refs if total_refs > 0 else None
+            cer_dict["total"] = total_cer
+            total_ctc_sum = sum(v["sum_ctc"] for v in group_stats.values() if "sum_ctc" in v)
+            total_ctc_count = sum(v["count_samples"] for v in group_stats.values() if "sum_ctc" in v)
+            if total_ctc_count > 0:
+                ctc_dict["total"] = total_ctc_sum / total_ctc_count
             print("CTC_dict:", ctc_dict)
             print("CER dict", cer_dict)
+            print("Total CER:", total_cer)
+            if total_cer is not None:
+                reporter.register({"cer_ctc_total": total_cer}, 1)
+                reporter.next()
             cer_history.append(cer_dict)
             ctc_history.append(ctc_dict)
             weights_history.append(last_weights)
@@ -1006,7 +1021,31 @@ class Trainer:
                 iterator_stop.fill_(1)
                 torch.distributed.all_reduce(iterator_stop, ReduceOp.SUM)
         current_epoch = reporter.get_epoch()
-        if update_weights:
+        if update_weights and metric_for_update == "cer_direct":
+            print(f"Using {metric_for_update} for weights update...")
+            cer_mov_avg = torch.load(output_dir / "cer_mov_avg.pth")
+            cer_mov_avg = {k: (1 - beta_mov_avg) * cer_mov_avg[k] + beta_mov_avg * cer_dict[k] for k in cer_mov_avg}
+            torch.save(cer_mov_avg, output_dir / "cer_mov_avg.pth")
+            print(f"CER mov avg at epoch {current_epoch}", cer_mov_avg)
+            cer_mov_avg_history.append(cer_mov_avg)
+            cer_mov_min_history.append(None)
+            cer_gap_history.append(None)
+            ctc_gap_history.append(None)
+            temperature = 1.0
+            vals = torch.tensor(list(cer_mov_avg.values()), dtype=torch.float32)
+            logits = vals / temperature
+            logZ = torch.logsumexp(logits, dim=0)
+            group_dro_weights = {
+                k: float(torch.exp(v - logZ))
+                for k, v in zip(cer_mov_avg.keys(), logits)
+            }
+            print("Weights after update:", group_dro_weights)
+            torch.save(group_dro_weights, output_dir / "group_dro_weights.pth")
+            torch.save(cer_mov_avg_history, output_dir / "cer_mov_avg_history.pth")
+            torch.save(cer_mov_min_history, output_dir / "cer_mov_min_history.pth")
+            torch.save(cer_gap_history, output_dir / "cer_gap_history.pth")
+            torch.save(ctc_gap_history, output_dir / "ctc_gap_history.pth")
+        elif update_weights:
             print(f"Using {metric_for_update} for weights update...")
             max_lang = max(cer_dict, key=cer_dict.get)
             max_cer = cer_dict[max_lang]
@@ -1084,6 +1123,9 @@ class Trainer:
             print("Weights after update:", group_dro_weights)
             torch.save(group_dro_weights, output_dir / "group_dro_weights.pth")
         else:
+            if metric_for_update == "cer_direct" and not (output_dir / "cer_mov_avg.pth").exists():
+                cer_mov_avg = cer_dict.copy()
+                torch.save(cer_mov_avg, output_dir / "cer_mov_avg.pth")
             cer_mov_avg_history.append(None)
             cer_mov_min_history.append(None)
             cer_gap_history.append(None)

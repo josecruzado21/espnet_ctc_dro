@@ -4,7 +4,7 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from typeguard import typechecked
-from .dro_ctc import DROCTCLoss, DROCTCLossOG
+from .dro_ctc import DROCTCLoss, DROCTCLossOG, DROOGLoss
 
 
 class CTC(torch.nn.Module):
@@ -58,8 +58,20 @@ class CTC(torch.nn.Module):
 
         elif self.ctc_type == "droctc_og":
             self.ctc_loss = DROCTCLossOG(
-                reduction="none", 
-                zero_infinity=zero_infinity, 
+                reduction="none",
+                zero_infinity=zero_infinity,
+                dro_group_count=dro_group_count,
+                dro_step_size=dro_step_size,
+                dro_q_epsilon=dro_q_epsilon,
+                accumulation=accumulation,
+                smoothing=smoothing,
+                normalize_grad=normalize_grad,
+                agg=agg)
+
+        elif self.ctc_type == "dro_og":
+            self.ctc_loss = DROOGLoss(
+                reduction="none",
+                zero_infinity=zero_infinity,
                 dro_group_count=dro_group_count,
                 dro_step_size=dro_step_size,
                 dro_q_epsilon=dro_q_epsilon,
@@ -96,21 +108,22 @@ class CTC(torch.nn.Module):
         self.reduce = reduce
 
     def loss_fn(self, th_pred, th_target, th_ilen, th_olen, utt_id=None, groups=None, groups_weights=None, valid=False) -> torch.Tensor:
-        if self.ctc_type == "builtin" or self.ctc_type == "brctc" or self.ctc_type == 'droctc' or self.ctc_type == "droctc_og":
+        if self.ctc_type == "builtin" or self.ctc_type == "brctc" or self.ctc_type == 'droctc' or self.ctc_type == "droctc_og" or self.ctc_type == "dro_og":
             th_pred = th_pred.log_softmax(2).float()
             if self.ctc_type == "droctc":
                 loss = self.ctc_loss(th_pred, th_target, th_ilen, th_olen, groups, groups_weights, valid)
                 # When valid we do not aggregate so we return the list of losses per group
                 if valid:
                     return loss
-            elif self.ctc_type == "droctc_og":
+            elif self.ctc_type == "droctc_og" or self.ctc_type == "dro_og":
                 loss = self.ctc_loss(th_pred, th_target, th_ilen, th_olen, utt_id, valid=valid)
-            else:
-                print("Using builtin CTC loss")
-                loss = self.ctc_loss(th_pred, th_target, th_ilen, th_olen)
-                print("loss1:", loss)
+                # When validating, return per-sample losses before averaging (same as droctc)
                 if valid:
                     return loss
+            else:
+                loss = self.ctc_loss(th_pred, th_target, th_ilen, th_olen)
+                if valid:
+                    return loss  # per-sample losses (B,), aggregation handled in CTC.forward
             if self.ctc_type == "builtin":
                 size = th_pred.size(1)
             else:
@@ -119,8 +132,10 @@ class CTC(torch.nn.Module):
             if self.reduce:
                 # Batch-size average
                 if self.ctc_type == "builtin":
-                    print("Dividing by 6 the average loss for builtin CTC")
-                    loss = loss.sum() / (size * 6)
+                    # This is equivalent to uniform weights per group, which is what builtin CTC does by default. We divide by the number of groups to be consistent with droctc.
+                    n_groups = len(set(groups)) if groups is not None else 1
+                    print(f"Dividing by {n_groups} groups for builtin CTC")
+                    loss = (loss.sum()) / (size * n_groups)
                 else:
                     loss = loss.sum() / size
             else:
@@ -217,10 +232,13 @@ class CTC(torch.nn.Module):
                 return loss.sum() / size, loss
             return loss
         
-        elif self.ctc_type == "droctc_og":
+        elif self.ctc_type == "droctc_og" or self.ctc_type == "dro_og":
             loss = self.loss_fn(ys_hat, ys_pad, hlens, ys_lens, utt_id=utt_id, valid=valid).to(
                 device=hs_pad.device, dtype=hs_pad.dtype
             )
+            if valid:
+                size = loss.size(0)
+                return loss.sum() / size, loss
             return loss
 
         elif self.ctc_type == "gtnctc":
@@ -232,9 +250,14 @@ class CTC(torch.nn.Module):
             # (B, L) -> (BxL,)
             ys_true = torch.cat([ys_pad[i, :l] for i, l in enumerate(ys_lens)])
 
-        loss = self.loss_fn(ys_hat, ys_true, hlens, ys_lens).to(
+        loss = self.loss_fn(ys_hat, ys_true, hlens, ys_lens, groups=groups, valid=valid).to(
             device=hs_pad.device, dtype=hs_pad.dtype
         )
+
+        if valid and self.ctc_type == "builtin":
+            per_sample = loss
+            mean_loss = per_sample.sum() / per_sample.size(0)
+            return mean_loss, per_sample
 
         return loss
 
