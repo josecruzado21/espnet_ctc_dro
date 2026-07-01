@@ -132,9 +132,6 @@ class CTC(torch.nn.Module):
             if self.reduce:
                 # Batch-size average
                 if self.ctc_type == "builtin":
-                    # This is equivalent to uniform weights per group, which is what builtin CTC does by default. We divide by the number of groups to be consistent with droctc.
-                    n_groups = len(set(groups)) if groups is not None else 1
-                    print(f"Dividing by {n_groups} groups for builtin CTC")
                     loss = (loss.sum()) / (size * n_groups)
                 else:
                     loss = loss.sum() / size

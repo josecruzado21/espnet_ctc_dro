@@ -111,6 +111,7 @@ class TrainerOptions:
     warmup_epochs: int
     beta_mov_avg: float
     metric_for_update: Optional[str]
+    dro_step_size: float
     continuous: bool
 
 
@@ -233,10 +234,18 @@ class Trainer:
         output_dir = Path(trainer_options.output_dir)
 
         train_groups = train_iter_factory.groups
+        print(f"[RESUME DEBUG] output_dir (relative): {output_dir}")
+        print(f"[RESUME DEBUG] output_dir (absolute): {output_dir.resolve()}")
+        print(f"[RESUME DEBUG] trainer_options.resume: {trainer_options.resume}")
+        print(f"[RESUME DEBUG] checkpoint.pth exists: {(output_dir / 'checkpoint.pth').exists()}")
+        print(f"[RESUME DEBUG] group_dro_weights.pth exists: {(output_dir / 'group_dro_weights.pth').exists()}")
         resuming = trainer_options.resume and (output_dir / "checkpoint.pth").exists()
+        print(f"[RESUME DEBUG] resuming: {resuming}")
         if resuming and (output_dir / "group_dro_weights.pth").exists():
             group_dro_weights = torch.load(output_dir / "group_dro_weights.pth")
+            print(f"[RESUME DEBUG] loaded group_dro_weights: {group_dro_weights}")
         else:
+            print(f"[RESUME DEBUG] WARNING: resetting group_dro_weights to uniform!")
             group_dro_weights = {k: 1/len(train_groups) for k in train_groups}
             torch.save(group_dro_weights, output_dir / "group_dro_weights.pth")
 
@@ -357,8 +366,8 @@ class Trainer:
 
         start_time = time.perf_counter()
         for iepoch in range(start_epoch, trainer_options.max_epoch + 1):
-            if trainer_options.metric_for_update == "cer_direct":
-                update_weights = (output_dir / "cer_mov_avg.pth").exists()
+            if trainer_options.metric_for_update in ("cer_direct", "cer_direct_dro"):
+                update_weights = True  # update from epoch 1: train uniform, validate, update weights, epoch 2 uses them
             else:
                 update_weights = (iepoch >= warmup_epochs)
             if iepoch != start_epoch:
@@ -395,6 +404,12 @@ class Trainer:
                     output_dir = output_dir
                 )
             _epoch_train_end = time.perf_counter()
+
+            # Save group_id_to_ix so the dro_q index mapping survives resume
+            _actual_model = dp_model.module if hasattr(dp_model, "module") else dp_model
+            _ctc_loss = getattr(getattr(_actual_model, "ctc", None), "ctc_loss", None)
+            if _ctc_loss is not None and hasattr(_ctc_loss, "group_id_to_ix") and _ctc_loss.group_id_to_ix:
+                torch.save(_ctc_loss.group_id_to_ix, output_dir / "group_id_to_ix.pth")
 
             torch.cuda.empty_cache()
             with reporter.observe("valid") as sub_reporter:
@@ -627,6 +642,16 @@ class Trainer:
         distributed = distributed_option.distributed
 
         group_dro_weights = torch.load(output_dir / "group_dro_weights.pth")
+        print(f"[BATCH WEIGHT DEBUG] epoch-level group_dro_weights at epoch start: {group_dro_weights}")
+        actual_model = model.module if hasattr(model, "module") else model
+        ctc_loss = getattr(getattr(actual_model, "ctc", None), "ctc_loss", None)
+        if ctc_loss is not None and hasattr(ctc_loss, "dro_q"):
+            print(f"[BATCH WEIGHT DEBUG] model dro_q (will drive batch_weight if group_id_to_ix populated): {ctc_loss.dro_q.tolist()}")
+            print(f"[BATCH WEIGHT DEBUG] group_id_to_ix: {ctc_loss.group_id_to_ix}")
+            group_id_to_ix_path = output_dir / "group_id_to_ix.pth"
+            if not ctc_loss.group_id_to_ix and group_id_to_ix_path.exists():
+                ctc_loss.group_id_to_ix = torch.load(group_id_to_ix_path)
+                print(f"[BATCH WEIGHT DEBUG] restored group_id_to_ix from file: {ctc_loss.group_id_to_ix}")
 
         batch_weight_history_path = output_dir / "batch_weight_history.pth"
         if batch_weight_history_path.exists():
@@ -1017,14 +1042,46 @@ class Trainer:
             torch.save(ctc_history, output_dir / "ctc_history.pth")
             torch.save(weights_history, output_dir / "group_dro_weights_history.pth")
 
+            # Remove "total" before weight updates — it is a summary stat, not a language group
+            cer_dict.pop("total", None)
+            ctc_dict.pop("total", None)
+
             if distributed:
                 iterator_stop.fill_(1)
                 torch.distributed.all_reduce(iterator_stop, ReduceOp.SUM)
         current_epoch = reporter.get_epoch()
-        if update_weights and metric_for_update == "cer_direct":
+        if update_weights and metric_for_update == "cer_direct_dro":
             print(f"Using {metric_for_update} for weights update...")
-            cer_mov_avg = torch.load(output_dir / "cer_mov_avg.pth")
-            cer_mov_avg = {k: (1 - beta_mov_avg) * cer_mov_avg[k] + beta_mov_avg * cer_dict[k] for k in cer_mov_avg}
+            eta = options.dro_step_size
+            if (output_dir / "cer_mov_avg.pth").exists():
+                cer_mov_avg = torch.load(output_dir / "cer_mov_avg.pth")
+                cer_mov_avg = {k: (1 - beta_mov_avg) * cer_mov_avg[k] + beta_mov_avg * cer_dict[k] for k in cer_mov_avg}
+            else:
+                cer_mov_avg = cer_dict.copy()
+            torch.save(cer_mov_avg, output_dir / "cer_mov_avg.pth")
+            print(f"CER mov avg at epoch {current_epoch}", cer_mov_avg)
+            q = torch.load(output_dir / "group_dro_weights.pth")
+            for g in q:
+                q[g] *= math.exp(eta * cer_mov_avg[g])
+            total = sum(q.values())
+            group_dro_weights = {g: v / total for g, v in q.items()}
+            print("Weights after update:", group_dro_weights)
+            torch.save(group_dro_weights, output_dir / "group_dro_weights.pth")
+            cer_mov_avg_history.append(cer_mov_avg)
+            cer_mov_min_history.append(None)
+            cer_gap_history.append(None)
+            ctc_gap_history.append(None)
+            torch.save(cer_mov_avg_history, output_dir / "cer_mov_avg_history.pth")
+            torch.save(cer_mov_min_history, output_dir / "cer_mov_min_history.pth")
+            torch.save(cer_gap_history, output_dir / "cer_gap_history.pth")
+            torch.save(ctc_gap_history, output_dir / "ctc_gap_history.pth")
+        elif update_weights and metric_for_update == "cer_direct":
+            print(f"Using {metric_for_update} for weights update...")
+            if (output_dir / "cer_mov_avg.pth").exists():
+                cer_mov_avg = torch.load(output_dir / "cer_mov_avg.pth")
+                cer_mov_avg = {k: (1 - beta_mov_avg) * cer_mov_avg[k] + beta_mov_avg * cer_dict[k] for k in cer_mov_avg}
+            else:
+                cer_mov_avg = cer_dict.copy()
             torch.save(cer_mov_avg, output_dir / "cer_mov_avg.pth")
             print(f"CER mov avg at epoch {current_epoch}", cer_mov_avg)
             cer_mov_avg_history.append(cer_mov_avg)
@@ -1123,9 +1180,6 @@ class Trainer:
             print("Weights after update:", group_dro_weights)
             torch.save(group_dro_weights, output_dir / "group_dro_weights.pth")
         else:
-            if metric_for_update == "cer_direct" and not (output_dir / "cer_mov_avg.pth").exists():
-                cer_mov_avg = cer_dict.copy()
-                torch.save(cer_mov_avg, output_dir / "cer_mov_avg.pth")
             cer_mov_avg_history.append(None)
             cer_mov_min_history.append(None)
             cer_gap_history.append(None)

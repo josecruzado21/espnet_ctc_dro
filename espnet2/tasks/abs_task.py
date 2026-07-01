@@ -763,6 +763,12 @@ class AbsTask(ABC):
             "(None keeps uniform weights)",
         )
         group.add_argument(
+            "--dro_step_size",
+            type=float,
+            default=0.01,
+            help="Step size eta for cer_direct_dro weight update: q[g] *= exp(eta * cer[g])",
+        )
+        group.add_argument(
             "--continuous",
             type=str2bool,
             default=True,
