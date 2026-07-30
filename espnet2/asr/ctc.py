@@ -32,7 +32,7 @@ class CTC(torch.nn.Module):
         dro_q_epsilon: float = 1e-10,
         accumulation: bool = False,
         smoothing: float = 0.,
-        normalize_grad: bool = True,
+        normalize_grad: Optional[bool] = None,
         reduce: bool = True,
         ignore_nan_grad: Optional[bool] = None,
         zero_infinity: bool = True,
@@ -46,6 +46,14 @@ class CTC(torch.nn.Module):
         self.dropout_rate = dropout_rate
         self.ctc_lo = torch.nn.Linear(eprojs, odim)
         self.ctc_type = ctc_type
+        self.dro_group_count = dro_group_count
+        if normalize_grad is None:
+            # Preserve each ctc_type's historical default when not set explicitly:
+            # builtin always divided by dro_group_count unconditionally, and
+            # droctc never applied any group-count scaling. droctc_og/dro_og
+            # keep their own pre-existing default of always compensating.
+            normalize_grad = ctc_type in ("droctc_og", "dro_og")
+        self.normalize_grad = normalize_grad
         if ignore_nan_grad is not None:
             zero_infinity = ignore_nan_grad
 
@@ -131,8 +139,12 @@ class CTC(torch.nn.Module):
 
             if self.reduce:
                 # Batch-size average
-                if self.ctc_type == "builtin":
-                    loss = (loss.sum()) / (size * n_groups)
+                if (self.ctc_type == "builtin") and (not self.normalize_grad):
+                    print("Dividing by dro_group_count:", self.dro_group_count)
+                    loss = (loss.sum()) / (size * self.dro_group_count)
+                elif self.ctc_type == "droctc" and self.normalize_grad:
+                    print("Multiplying by dro_group_count:", self.dro_group_count)
+                    loss = (loss.sum() / size) * self.dro_group_count
                 else:
                     loss = loss.sum() / size
             else:

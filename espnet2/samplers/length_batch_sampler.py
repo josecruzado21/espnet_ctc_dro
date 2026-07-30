@@ -1,4 +1,4 @@
-from typing import Iterator, List, Tuple, Union
+from typing import Iterator, List, Optional, Tuple, Union
 
 from typeguard import typechecked
 
@@ -17,6 +17,7 @@ class LengthBatchSampler(AbsSampler):
         sort_batch: str = "ascending",
         drop_last: bool = False,
         padding: bool = True,
+        utt2category_file: Optional[str] = None,
     ):
         assert batch_bins > 0
         if sort_batch != "ascending" and sort_batch != "descending":
@@ -33,6 +34,15 @@ class LengthBatchSampler(AbsSampler):
         self.sort_in_batch = sort_in_batch
         self.sort_batch = sort_batch
         self.drop_last = drop_last
+
+        if utt2category_file is not None:
+            groups = set()
+            with open(utt2category_file, "r") as f:
+                for line in f:
+                    _, group = line.strip().split()
+                    groups.add(group)
+            groups = list(groups)
+            self.groups = groups
 
         # utt2shape: (Length, ...)
         #    uttA 100,...
