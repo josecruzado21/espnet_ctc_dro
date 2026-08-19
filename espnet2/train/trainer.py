@@ -113,6 +113,7 @@ class TrainerOptions:
     metric_for_update: Optional[str]
     dro_step_size: float
     continuous: bool
+    chi_ibr_conf: dict
 
 
 def _get_current_dro_weights(model, group_dro_weights):
@@ -135,6 +136,17 @@ def _get_current_dro_weights(model, group_dro_weights):
             for i in range(len(ctc_loss.group_id_to_ix))
         }
     return {k: float(v) for k, v in group_dro_weights.items()}
+
+
+# Used to convert batch["speech_lengths"] (raw sample counts) to seconds for
+# ctc_normalized_time. Not read from frontend_conf.fs because S3prlFrontend
+# (espnet2/asr/frontend/s3prl.py) only uses fs transiently in __init__ to
+# validate/resample -- it isn't kept as an attribute on the live model -- and
+# S3PRL's upstream models only support 16 kHz audio anyway (that frontend
+# itself warns if fs != 16000), so this project's audio is always at this
+# rate in practice. Update this if a non-S3PRL frontend at a different
+# sample rate is ever used.
+AUDIO_SAMPLE_RATE_HZ = 16000
 
 
 class Trainer:
@@ -295,6 +307,24 @@ class Trainer:
                 f"The training has already reached at max_epoch: {start_epoch}"
             )
 
+        # NOTE: a resumed run must re-check early stopping against the reporter
+        # history it just loaded, not just against max_epoch. Without this,
+        # resuming a run that already early-stopped in a previous process
+        # silently trains further epochs until the patience window (measured
+        # from whatever epoch happens to look best) elapses again.
+        already_converged = False
+        if resuming and trainer_options.patience is not None:
+            already_converged = reporter.check_early_stopping(
+                trainer_options.patience, *trainer_options.early_stopping_criterion
+            )
+            if already_converged:
+                logging.warning(
+                    "Resumed training had already satisfied the early-stopping "
+                    f"condition as of epoch {reporter.get_epoch()} "
+                    f"(patience={trainer_options.patience}). Skipping further "
+                    "training epochs; proceeding straight to model averaging."
+                )
+
         if distributed_option.distributed:
             if trainer_options.sharded_ddp:
                 dp_model = fairscale.nn.data_parallel.ShardedDataParallel(
@@ -365,7 +395,10 @@ class Trainer:
             train_summary_writer = None
 
         start_time = time.perf_counter()
-        for iepoch in range(start_epoch, trainer_options.max_epoch + 1):
+        for iepoch in (
+            [] if already_converged
+            else range(start_epoch, trainer_options.max_epoch + 1)
+        ):
             if trainer_options.metric_for_update in ("cer_direct", "cer_direct_dro"):
                 update_weights = True  # update from epoch 1: train uniform, validate, update weights, epoch 2 uses them
             else:
@@ -423,6 +456,23 @@ class Trainer:
                     update_weights = update_weights
                 )
             _epoch_valid_end = time.perf_counter()
+
+            # chi-IBR: feed this epoch's freshly-computed q into the training
+            # iterator factory for the *next* epoch's resample. No-op for
+            # every non-chi-IBR run: only EpochAwareSequenceIterFactory
+            # defines set_q; the default SequenceIterFactory does not, so
+            # hasattr() is False and nothing below ever executes.
+            # When metric_for_update=="chi_ibr", read our own chi_ibr_q.pth
+            # (written by validate_one_epoch's solve_q branch); otherwise
+            # (e.g. testing chi-IBR resampling driven by cer_direct, as
+            # before solve_q existed) fall back to group_dro_weights.pth.
+            if hasattr(train_iter_factory, "set_q"):
+                if trainer_options.metric_for_update == "chi_ibr":
+                    weights_path = output_dir / "chi_ibr_q.pth"
+                else:
+                    weights_path = output_dir / "group_dro_weights.pth"
+                if weights_path.exists():
+                    train_iter_factory.set_q(torch.load(weights_path))
 
             torch.cuda.empty_cache()
             if not distributed_option.distributed or distributed_option.dist_rank == 0:
@@ -643,6 +693,22 @@ class Trainer:
 
         group_dro_weights = torch.load(output_dir / "group_dro_weights.pth")
         print(f"[BATCH WEIGHT DEBUG] epoch-level group_dro_weights at epoch start: {group_dro_weights}")
+
+        # Diagnostic-only fallback for batch_weight_history (see
+        # _get_current_dro_weights below): chi_ibr's real per-epoch weight is
+        # chi_ibr_q.pth / chi_ibr_p_train.pth, not group_dro_weights.pth (which
+        # chi_ibr never writes). Kept separate from `group_dro_weights` above
+        # so this only changes what gets logged, never what the loss actually
+        # receives via `model(**batch, group_dro_weights=group_dro_weights)`.
+        if options.metric_for_update == "chi_ibr":
+            chi_ibr_q_path = output_dir / "chi_ibr_q.pth"
+            if chi_ibr_q_path.exists():
+                display_weights = torch.load(chi_ibr_q_path)
+            else:
+                display_weights = torch.load(output_dir / "chi_ibr_p_train.pth")
+        else:
+            display_weights = group_dro_weights
+
         actual_model = model.module if hasattr(model, "module") else model
         ctc_loss = getattr(getattr(actual_model, "ctc", None), "ctc_loss", None)
         if ctc_loss is not None and hasattr(ctc_loss, "dro_q"):
@@ -894,7 +960,7 @@ class Trainer:
                     ),
                 )
                 start_time = time.perf_counter()
-                batch_weight_history.append(_get_current_dro_weights(model, group_dro_weights))
+                batch_weight_history.append(_get_current_dro_weights(model, display_weights))
 
             # NOTE(kamo): Call log_message() after next()
             reporter.next()
@@ -933,28 +999,68 @@ class Trainer:
         if not (output_dir / "cer_history.pth").exists():
             cer_history = []
             ctc_history = []
+            ctc_normalized_history = []
+            ctc_normalized_time_history = []
             weights_history = []
-            last_weights = torch.load(output_dir / "group_dro_weights.pth")
             cer_mov_avg_history = []
             cer_mov_min_history = []
             cer_gap_history = []
             ctc_gap_history = []
+            ctc_normalized_gap_history = []
+            ctc_normalized_time_gap_history = []
         else:
             cer_history = torch.load(output_dir / "cer_history.pth")
             ctc_history = torch.load(output_dir / "ctc_history.pth")
+            # Defensive: a resume from an output_dir created before
+            # ctc_normalized/ctc_normalized_time tracking existed won't have
+            # these files yet.
+            ctc_normalized_history = (
+                torch.load(output_dir / "ctc_normalized_history.pth")
+                if (output_dir / "ctc_normalized_history.pth").exists() else []
+            )
+            ctc_normalized_time_history = (
+                torch.load(output_dir / "ctc_normalized_time_history.pth")
+                if (output_dir / "ctc_normalized_time_history.pth").exists() else []
+            )
             weights_history = torch.load(output_dir / "group_dro_weights_history.pth")
-            last_weights = torch.load(output_dir / "group_dro_weights.pth")
             cer_mov_avg_history = torch.load(output_dir / "cer_mov_avg_history.pth")
             cer_mov_min_history = torch.load(output_dir / "cer_mov_min_history.pth")
             cer_gap_history = torch.load(output_dir / "cer_gap_history.pth")
             ctc_gap_history = torch.load(output_dir / "ctc_gap_history.pth")
-        
+            ctc_normalized_gap_history = (
+                torch.load(output_dir / "ctc_normalized_gap_history.pth")
+                if (output_dir / "ctc_normalized_gap_history.pth").exists() else []
+            )
+            ctc_normalized_time_gap_history = (
+                torch.load(output_dir / "ctc_normalized_time_gap_history.pth")
+                if (output_dir / "ctc_normalized_time_gap_history.pth").exists() else []
+            )
+
+        # What "weights in use" means depends on the mechanism: for the
+        # loss-reweighting metrics (cer/cer_direct/cer_direct_dro) it's
+        # group_dro_weights.pth, updated below in this same function. For
+        # chi_ibr there is no loss reweighting -- the group_dro_weights.pth
+        # branch is never taken -- the mechanism instead resamples the
+        # training set under chi_ibr_q.pth (falling back to the fixed
+        # chi_ibr_p_train.pth before the first update, i.e. during warmup).
+        # Recording group_dro_weights.pth here for chi_ibr would just log a
+        # frozen uniform placeholder that never drives anything.
+        if metric_for_update == "chi_ibr":
+            if (output_dir / "chi_ibr_q.pth").exists():
+                last_weights = torch.load(output_dir / "chi_ibr_q.pth")
+            else:
+                last_weights = torch.load(output_dir / "chi_ibr_p_train.pth")
+        else:
+            last_weights = torch.load(output_dir / "group_dro_weights.pth")
+
         ngpu = options.ngpu
         no_forward_run = options.no_forward_run
         distributed = distributed_option.distributed
         group_stats = {}
         cer_dict = {}
         ctc_dict = {}
+        ctc_normalized_dict = {}
+        ctc_normalized_time_dict = {}
         model.eval()
         # [For distributed] Because iteration counts are not always equals between
         # processes, send stop-flag to the other processes if iterator is finished
@@ -990,13 +1096,30 @@ class Trainer:
                 ctc_per_sample = True
             for obs_idx, g in enumerate(batch["groups"]):
                 if g not in group_stats:
-                    group_stats[g] = {"sum_edit_distances": stats["edit_distances"][obs_idx].item(), 
+                    group_stats[g] = {"sum_edit_distances": stats["edit_distances"][obs_idx].item(),
                                       "sum_ref_lengths": stats["ref_lengths"][obs_idx].item()}
                     if ctc_per_sample:
                         # print("CTC for sample1:", stats["ctc_per_sample"][obs_idx].item())
                         if stats["ctc_per_sample"][obs_idx] is not None and torch.isfinite(stats["ctc_per_sample"][obs_idx]):
                             group_stats[g]["sum_ctc"] = stats["ctc_per_sample"][obs_idx].item()
                             group_stats [g]["count_samples"] = 1
+                        # Length-normalized CTC: divide each utterance's raw
+                        # loss by its own true target length before
+                        # averaging, using .get(..., default) rather than a
+                        # bare init since a group's first utterance can have
+                        # text_length == 0 (CTCLoss(zero_infinity=True) can
+                        # still return a finite loss for an empty target),
+                        # which must be skipped without ever KeyError-ing on
+                        # a later, valid utterance in the same group.
+                        raw = stats["ctc_per_sample"][obs_idx]
+                        text_len = batch["text_lengths"][obs_idx].item()
+                        if raw is not None and torch.isfinite(raw) and text_len > 0:
+                            group_stats[g]["sum_ctc_normalized"] = group_stats[g].get("sum_ctc_normalized", 0.0) + raw.item() / text_len
+                            group_stats[g]["count_samples_normalized"] = group_stats[g].get("count_samples_normalized", 0) + 1
+                        duration_sec = batch["speech_lengths"][obs_idx].item() / AUDIO_SAMPLE_RATE_HZ
+                        if raw is not None and torch.isfinite(raw) and duration_sec > 0:
+                            group_stats[g]["sum_ctc_normalized_time"] = group_stats[g].get("sum_ctc_normalized_time", 0.0) + raw.item() / duration_sec
+                            group_stats[g]["count_samples_normalized_time"] = group_stats[g].get("count_samples_normalized_time", 0) + 1
                 else:
                     group_stats[g]["sum_edit_distances"] += stats["edit_distances"][obs_idx].item()
                     group_stats[g]["sum_ref_lengths"] += stats["ref_lengths"][obs_idx].item()
@@ -1005,6 +1128,15 @@ class Trainer:
                         if stats["ctc_per_sample"][obs_idx] is not None and torch.isfinite(stats["ctc_per_sample"][obs_idx]):
                             group_stats[g]["sum_ctc"] += stats["ctc_per_sample"][obs_idx].item()
                             group_stats[g]["count_samples"] += 1
+                        raw = stats["ctc_per_sample"][obs_idx]
+                        text_len = batch["text_lengths"][obs_idx].item()
+                        if raw is not None and torch.isfinite(raw) and text_len > 0:
+                            group_stats[g]["sum_ctc_normalized"] = group_stats[g].get("sum_ctc_normalized", 0.0) + raw.item() / text_len
+                            group_stats[g]["count_samples_normalized"] = group_stats[g].get("count_samples_normalized", 0) + 1
+                        duration_sec = batch["speech_lengths"][obs_idx].item() / AUDIO_SAMPLE_RATE_HZ
+                        if raw is not None and torch.isfinite(raw) and duration_sec > 0:
+                            group_stats[g]["sum_ctc_normalized_time"] = group_stats[g].get("sum_ctc_normalized_time", 0.0) + raw.item() / duration_sec
+                            group_stats[g]["count_samples_normalized_time"] = group_stats[g].get("count_samples_normalized_time", 0) + 1
             print("Group stats:", group_stats)
             for key in ["edit_distances", "ref_lengths", "ctc_per_sample"]:
                 stats.pop(key, None)
@@ -1021,6 +1153,10 @@ class Trainer:
                 cer_dict[k] = cer_lang
                 if "sum_ctc" in v:
                     ctc_dict[k] = v["sum_ctc"] / v["count_samples"]
+                if "sum_ctc_normalized" in v:
+                    ctc_normalized_dict[k] = v["sum_ctc_normalized"] / v["count_samples_normalized"]
+                if "sum_ctc_normalized_time" in v:
+                    ctc_normalized_time_dict[k] = v["sum_ctc_normalized_time"] / v["count_samples_normalized_time"]
             total_edits = sum(v["sum_edit_distances"] for v in group_stats.values())
             total_refs = sum(v["sum_ref_lengths"] for v in group_stats.values())
             total_cer = total_edits / total_refs if total_refs > 0 else None
@@ -1029,7 +1165,17 @@ class Trainer:
             total_ctc_count = sum(v["count_samples"] for v in group_stats.values() if "sum_ctc" in v)
             if total_ctc_count > 0:
                 ctc_dict["total"] = total_ctc_sum / total_ctc_count
+            total_ctc_normalized_sum = sum(v["sum_ctc_normalized"] for v in group_stats.values() if "sum_ctc_normalized" in v)
+            total_ctc_normalized_count = sum(v["count_samples_normalized"] for v in group_stats.values() if "sum_ctc_normalized" in v)
+            if total_ctc_normalized_count > 0:
+                ctc_normalized_dict["total"] = total_ctc_normalized_sum / total_ctc_normalized_count
+            total_ctc_normalized_time_sum = sum(v["sum_ctc_normalized_time"] for v in group_stats.values() if "sum_ctc_normalized_time" in v)
+            total_ctc_normalized_time_count = sum(v["count_samples_normalized_time"] for v in group_stats.values() if "sum_ctc_normalized_time" in v)
+            if total_ctc_normalized_time_count > 0:
+                ctc_normalized_time_dict["total"] = total_ctc_normalized_time_sum / total_ctc_normalized_time_count
             print("CTC_dict:", ctc_dict)
+            print("CTC_normalized_dict:", ctc_normalized_dict)
+            print("CTC_normalized_time_dict:", ctc_normalized_time_dict)
             print("CER dict", cer_dict)
             print("Total CER:", total_cer)
             if total_cer is not None:
@@ -1037,14 +1183,20 @@ class Trainer:
                 reporter.next()
             cer_history.append(cer_dict)
             ctc_history.append(ctc_dict)
+            ctc_normalized_history.append(ctc_normalized_dict)
+            ctc_normalized_time_history.append(ctc_normalized_time_dict)
             weights_history.append(last_weights)
             torch.save(cer_history, output_dir / "cer_history.pth")
             torch.save(ctc_history, output_dir / "ctc_history.pth")
+            torch.save(ctc_normalized_history, output_dir / "ctc_normalized_history.pth")
+            torch.save(ctc_normalized_time_history, output_dir / "ctc_normalized_time_history.pth")
             torch.save(weights_history, output_dir / "group_dro_weights_history.pth")
 
             # Remove "total" before weight updates — it is a summary stat, not a language group
             cer_dict.pop("total", None)
             ctc_dict.pop("total", None)
+            ctc_normalized_dict.pop("total", None)
+            ctc_normalized_time_dict.pop("total", None)
 
             if distributed:
                 iterator_stop.fill_(1)
@@ -1071,10 +1223,14 @@ class Trainer:
             cer_mov_min_history.append(None)
             cer_gap_history.append(None)
             ctc_gap_history.append(None)
+            ctc_normalized_gap_history.append(None)
+            ctc_normalized_time_gap_history.append(None)
             torch.save(cer_mov_avg_history, output_dir / "cer_mov_avg_history.pth")
             torch.save(cer_mov_min_history, output_dir / "cer_mov_min_history.pth")
             torch.save(cer_gap_history, output_dir / "cer_gap_history.pth")
             torch.save(ctc_gap_history, output_dir / "ctc_gap_history.pth")
+            torch.save(ctc_normalized_gap_history, output_dir / "ctc_normalized_gap_history.pth")
+            torch.save(ctc_normalized_time_gap_history, output_dir / "ctc_normalized_time_gap_history.pth")
         elif update_weights and metric_for_update == "cer_direct":
             print(f"Using {metric_for_update} for weights update...")
             if (output_dir / "cer_mov_avg.pth").exists():
@@ -1088,6 +1244,8 @@ class Trainer:
             cer_mov_min_history.append(None)
             cer_gap_history.append(None)
             ctc_gap_history.append(None)
+            ctc_normalized_gap_history.append(None)
+            ctc_normalized_time_gap_history.append(None)
             temperature = 1.0
             vals = torch.tensor(list(cer_mov_avg.values()), dtype=torch.float32)
             logits = vals / temperature
@@ -1102,6 +1260,46 @@ class Trainer:
             torch.save(cer_mov_min_history, output_dir / "cer_mov_min_history.pth")
             torch.save(cer_gap_history, output_dir / "cer_gap_history.pth")
             torch.save(ctc_gap_history, output_dir / "ctc_gap_history.pth")
+            torch.save(ctc_normalized_gap_history, output_dir / "ctc_normalized_gap_history.pth")
+            torch.save(ctc_normalized_time_gap_history, output_dir / "ctc_normalized_time_gap_history.pth")
+        elif update_weights and metric_for_update == "chi_ibr":
+            print(f"Using {metric_for_update} for weights update...")
+            from espnet2.samplers.chi_ibr_resample import solve_q
+
+            chi_ibr_conf = options.chi_ibr_conf
+            p_train = torch.load(output_dir / "chi_ibr_p_train.pth")
+            # v = L_hat directly (no baseline subtraction -- b_i not wired in
+            # yet). chi_ibr_conf.metric_for_update picks CER vs CTC as the
+            # L_hat signal -- unrelated to the top-level --metric_for_update,
+            # which picked "chi_ibr" as the DRO mechanism in the first place.
+            chi_ibr_metric = chi_ibr_conf.get("metric_for_update", "ctc")
+            if chi_ibr_metric == "ctc":
+                v = ctc_dict
+            elif chi_ibr_metric == "cer":
+                v = cer_dict
+            else:
+                raise ValueError(
+                    f"chi_ibr_conf.metric_for_update must be 'ctc' or 'cer', "
+                    f"got {chi_ibr_metric!r}"
+                )
+            print(f"chi_ibr using {chi_ibr_metric} as L_hat: {v}")
+            q = solve_q(
+                p_train,
+                v,
+                rho=chi_ibr_conf.get("rho", 0.1),
+                min_prob=chi_ibr_conf.get("min_prob", 0.2),
+            )
+            print(f"chi_ibr q at epoch {current_epoch}:", q)
+            torch.save(q, output_dir / "chi_ibr_q.pth")
+            # Deliberately not appending to cer_mov_avg_history/cer_mov_min_history/
+            # cer_gap_history/ctc_gap_history/ctc_normalized_gap_history/
+            # ctc_normalized_time_gap_history here -- this branch already
+            # never did for the first four (a pre-existing desync vs.
+            # cer_history/ctc_history/weights_history, which ARE always saved
+            # above regardless of branch). The two ctc_normalized* gap
+            # histories inherit the same omission so they aren't
+            # inconsistently "more correct" than their siblings for a
+            # different reason.
         elif update_weights:
             print(f"Using {metric_for_update} for weights update...")
             max_lang = max(cer_dict, key=cer_dict.get)
@@ -1123,7 +1321,7 @@ class Trainer:
                 cer_mov_min = torch.load(output_dir / "cer_mov_min.pth")
                 ctc_mov_avg = torch.load(output_dir / "ctc_mov_avg.pth")
                 ctc_mov_min = torch.load(output_dir / "ctc_mov_min.pth")
-                
+
                 # Update CER moving avg/min
                 cer_mov_avg = {k: (1 - beta_mov_avg) * cer_mov_avg[k] + beta_mov_avg * cer_dict[k] for k in cer_mov_avg}
                 torch.save(cer_mov_avg, output_dir / "cer_mov_avg.pth")
@@ -1138,19 +1336,69 @@ class Trainer:
                     ctc_mov_min = {k: min(ctc_mov_min[k], ctc_mov_avg[k]) for k in ctc_mov_min}
                     torch.save(ctc_mov_min, output_dir / "ctc_mov_min.pth")
 
+            # ctc_normalized / ctc_normalized_time mov avg/min are each
+            # tracked with an independent existence check (not folded into
+            # the cer_mov_avg.pth gate above) so that resuming an output_dir
+            # created before these metrics existed cold-inits them here
+            # instead of crashing on FileNotFoundError. Computed
+            # unconditionally (like cer/ctc above), regardless of what
+            # metric_for_update is set to this epoch, so switching
+            # metric_for_update mid-resumed-run doesn't cold-start these EMAs
+            # -- and so they're recorded even when metric_for_update is None
+            # or something else entirely.
+            if (output_dir / "ctc_normalized_mov_avg.pth").exists():
+                ctc_normalized_mov_avg = torch.load(output_dir / "ctc_normalized_mov_avg.pth")
+                ctc_normalized_mov_min = torch.load(output_dir / "ctc_normalized_mov_min.pth")
+                ctc_normalized_mov_avg = {k: (1 - beta_mov_avg) * ctc_normalized_mov_avg[k] + beta_mov_avg * ctc_normalized_dict[k] for k in ctc_normalized_mov_avg}
+                torch.save(ctc_normalized_mov_avg, output_dir / "ctc_normalized_mov_avg.pth")
+                if continuous:
+                    print("Updating CTC normalized mov min...")
+                    ctc_normalized_mov_min = {k: min(ctc_normalized_mov_min[k], ctc_normalized_mov_avg[k]) for k in ctc_normalized_mov_min}
+                    torch.save(ctc_normalized_mov_min, output_dir / "ctc_normalized_mov_min.pth")
+            else:
+                ctc_normalized_mov_avg = ctc_normalized_dict.copy()
+                torch.save(ctc_normalized_mov_avg, output_dir / "ctc_normalized_mov_avg.pth")
+                ctc_normalized_mov_min = ctc_normalized_dict.copy()
+                torch.save(ctc_normalized_mov_min, output_dir / "ctc_normalized_mov_min.pth")
+
+            if (output_dir / "ctc_normalized_time_mov_avg.pth").exists():
+                ctc_normalized_time_mov_avg = torch.load(output_dir / "ctc_normalized_time_mov_avg.pth")
+                ctc_normalized_time_mov_min = torch.load(output_dir / "ctc_normalized_time_mov_min.pth")
+                ctc_normalized_time_mov_avg = {k: (1 - beta_mov_avg) * ctc_normalized_time_mov_avg[k] + beta_mov_avg * ctc_normalized_time_dict[k] for k in ctc_normalized_time_mov_avg}
+                torch.save(ctc_normalized_time_mov_avg, output_dir / "ctc_normalized_time_mov_avg.pth")
+                if continuous:
+                    print("Updating CTC normalized time mov min...")
+                    ctc_normalized_time_mov_min = {k: min(ctc_normalized_time_mov_min[k], ctc_normalized_time_mov_avg[k]) for k in ctc_normalized_time_mov_min}
+                    torch.save(ctc_normalized_time_mov_min, output_dir / "ctc_normalized_time_mov_min.pth")
+            else:
+                ctc_normalized_time_mov_avg = ctc_normalized_time_dict.copy()
+                torch.save(ctc_normalized_time_mov_avg, output_dir / "ctc_normalized_time_mov_avg.pth")
+                ctc_normalized_time_mov_min = ctc_normalized_time_dict.copy()
+                torch.save(ctc_normalized_time_mov_min, output_dir / "ctc_normalized_time_mov_min.pth")
+
             print(f"CER mov avg at epoch {current_epoch}", cer_mov_avg)
             print(f"CER mov min at epoch {current_epoch}", cer_mov_min)
             print(f"CTC mov avg at epoch {current_epoch}", ctc_mov_avg)
             print(f"CTC mov min at epoch {current_epoch}", ctc_mov_min)
+            print(f"CTC normalized mov avg at epoch {current_epoch}", ctc_normalized_mov_avg)
+            print(f"CTC normalized mov min at epoch {current_epoch}", ctc_normalized_mov_min)
+            print(f"CTC normalized time mov avg at epoch {current_epoch}", ctc_normalized_time_mov_avg)
+            print(f"CTC normalized time mov min at epoch {current_epoch}", ctc_normalized_time_mov_min)
             cer_mov_avg_history.append(cer_mov_avg)
             cer_mov_min_history.append(cer_mov_min)
             print("Updating weights...")
             cer_gap = {k: cer_mov_avg[k] - cer_mov_min[k] for k in cer_mov_avg}
             ctc_gap = {k: ctc_dict[k] - ctc_mov_min[k] for k in ctc_dict}
+            ctc_normalized_gap = {k: ctc_normalized_dict[k] - ctc_normalized_mov_min[k] for k in ctc_normalized_dict}
+            ctc_normalized_time_gap = {k: ctc_normalized_time_dict[k] - ctc_normalized_time_mov_min[k] for k in ctc_normalized_time_dict}
             print("CER gap:", cer_gap)
             print("CTC gap:", ctc_gap)
+            print("CTC normalized gap:", ctc_normalized_gap)
+            print("CTC normalized time gap:", ctc_normalized_time_gap)
             torch.save(cer_gap, output_dir / "cer_gap.pth")
             torch.save(ctc_gap, output_dir / "ctc_gap.pth")
+            torch.save(ctc_normalized_gap, output_dir / "ctc_normalized_gap.pth")
+            torch.save(ctc_normalized_time_gap, output_dir / "ctc_normalized_time_gap.pth")
             if metric_for_update == "cer":
                 temperature = 1.0
                 vals = torch.tensor(list(cer_gap.values()), dtype=torch.float32)
@@ -1169,14 +1417,47 @@ class Trainer:
                     k: float(torch.exp(v - logZ))
                     for k, v in zip(ctc_gap.keys(), logits)
                 }
+            elif metric_for_update == "ctc_normalized":
+                # Placeholder temperature -- normalized-CTC values observed
+                # in practice run roughly 0.1-10 (closer to cer's 0-1 scale
+                # than raw ctc's 10-600 scale), so neither cer's temperature
+                # (1.0) nor ctc's (500) transfers here. Inspect
+                # ctc_normalized_gap.pth magnitudes after a few real epochs
+                # and retune before relying on this for a real run.
+                temperature = 5.0
+                vals = torch.tensor(list(ctc_normalized_gap.values()), dtype=torch.float32)
+                logits = vals / temperature
+                logZ = torch.logsumexp(logits, dim=0)
+                group_dro_weights = {
+                    k: float(torch.exp(v - logZ))
+                    for k, v in zip(ctc_normalized_gap.keys(), logits)
+                }
+            elif metric_for_update == "ctc_normalized_time":
+                # Placeholder temperature, same caveat as ctc_normalized
+                # above -- normalized-by-duration values observed in
+                # practice run roughly 1-15. Retune against real
+                # ctc_normalized_time_gap.pth magnitudes before trusting
+                # this for a real run.
+                temperature = 5.0
+                vals = torch.tensor(list(ctc_normalized_time_gap.values()), dtype=torch.float32)
+                logits = vals / temperature
+                logZ = torch.logsumexp(logits, dim=0)
+                group_dro_weights = {
+                    k: float(torch.exp(v - logZ))
+                    for k, v in zip(ctc_normalized_time_gap.keys(), logits)
+                }
             elif metric_for_update == None:
                 group_dro_weights = {k: 1 / len(cer_gap) for k in cer_gap.keys()}
             cer_gap_history.append(cer_gap)
             ctc_gap_history.append(ctc_gap)
+            ctc_normalized_gap_history.append(ctc_normalized_gap)
+            ctc_normalized_time_gap_history.append(ctc_normalized_time_gap)
             torch.save(cer_mov_avg_history, output_dir / "cer_mov_avg_history.pth")
             torch.save(cer_mov_min_history, output_dir / "cer_mov_min_history.pth")
             torch.save(cer_gap_history, output_dir / "cer_gap_history.pth")
             torch.save(ctc_gap_history, output_dir / "ctc_gap_history.pth")
+            torch.save(ctc_normalized_gap_history, output_dir / "ctc_normalized_gap_history.pth")
+            torch.save(ctc_normalized_time_gap_history, output_dir / "ctc_normalized_time_gap_history.pth")
             print("Weights after update:", group_dro_weights)
             torch.save(group_dro_weights, output_dir / "group_dro_weights.pth")
         else:
@@ -1184,10 +1465,14 @@ class Trainer:
             cer_mov_min_history.append(None)
             cer_gap_history.append(None)
             ctc_gap_history.append(None)
+            ctc_normalized_gap_history.append(None)
+            ctc_normalized_time_gap_history.append(None)
             torch.save(cer_mov_avg_history, output_dir / "cer_mov_avg_history.pth")
             torch.save(cer_mov_min_history, output_dir / "cer_mov_min_history.pth")
             torch.save(cer_gap_history, output_dir / "cer_gap_history.pth")
             torch.save(ctc_gap_history, output_dir / "ctc_gap_history.pth")
+            torch.save(ctc_normalized_gap_history, output_dir / "ctc_normalized_gap_history.pth")
+            torch.save(ctc_normalized_time_gap_history, output_dir / "ctc_normalized_time_gap_history.pth")
         print()
         print()
 

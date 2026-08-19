@@ -759,8 +759,9 @@ class AbsTask(ABC):
             "--metric_for_update",
             type=str_or_none,
             default=None,
-            help="Metric used to update DRO group weights: 'cer', 'ctc', or None "
-            "(None keeps uniform weights)",
+            help="Metric used to update DRO group weights: 'cer', 'ctc', "
+            "'ctc_normalized', 'ctc_normalized_time', or None (None keeps "
+            "uniform weights)",
         )
         group.add_argument(
             "--dro_step_size",
@@ -773,6 +774,28 @@ class AbsTask(ABC):
             type=str2bool,
             default=True,
             help="Whether to use continupos for calculating minimum metrics for DRO weight updates",
+        )
+        group.add_argument(
+            "--chi_ibr_conf",
+            action=NestedDictAction,
+            default=dict(
+                activate=False,
+                rho=0.1,
+                min_prob=0.2,
+                max_scale_up=1.5,
+                metric_for_update="ctc",
+            ),
+            help="chi-IBR (chi-square Iterated Best Response) resampling config. "
+            "activate: whether to use chi-IBR per-epoch resampling instead of "
+            "static batching. rho: radius of the chi-square uncertainty ball "
+            "around p_train. min_prob: floor on q_g / p_train_g so no language "
+            "is ever fully excluded from an epoch. max_scale_up: cap on the "
+            "resampled epoch's virtual size, as a multiple of the real total "
+            "dataset size. metric_for_update: 'ctc' or 'cer' -- which "
+            "per-language loss metric is L_hat_g (the paper's L_i) driving the "
+            "q-update. This is unrelated to the top-level --metric_for_update "
+            "above, which selects between the other (non-chi-IBR) DRO "
+            "mechanisms.",
         )
 
         group = parser.add_argument_group("Pretraining model related")
@@ -1924,6 +1947,20 @@ class AbsTask(ABC):
                     out.write(f"{utt} {utt.split('_')[1]}\n")
             tmp_file.rename(base_path / "utt2category")
             utt2category_file = str(base_path / "utt2category")
+
+        # chi-IBR: fully separate, additive path. Only taken when explicitly
+        # activated via --chi_ibr_conf activate=true, and only for the
+        # training iterator (validation always uses the normal static path
+        # below, unchanged). When not activated (the default for every
+        # existing config), execution falls straight through to the
+        # pre-existing code below with zero behavior change.
+        if mode == "train" and getattr(args, "chi_ibr_conf", {}).get(
+            "activate", False
+        ):
+            return cls._build_chi_ibr_iter_factory(
+                args, iter_options, utt2category_file
+            )
+
         batch_sampler = build_batch_sampler(
             type=iter_options.batch_type,
             shape_files=iter_options.shape_files,
@@ -1999,6 +2036,78 @@ class AbsTask(ABC):
             collate_fn=iter_options.collate_fn,
             pin_memory=args.ngpu > 0,
             groups = batch_sampler.groups
+        )
+
+    @classmethod
+    @typechecked
+    def _build_chi_ibr_iter_factory(
+        cls,
+        args: argparse.Namespace,
+        iter_options: IteratorOptions,
+        utt2category_file: str,
+    ) -> AbsIterFactory:
+        """chi-IBR training iterator: rebuilds batches fresh every epoch.
+
+        Only reachable when --chi_ibr_conf activate=true and mode == "train"
+        (see the guard in build_sequence_iter_factory). Never touched by any
+        run that doesn't explicitly opt in.
+        """
+        from espnet2.fileio.read_text import load_num_sequence_text, read_2columns_text
+        from espnet2.iterators.epoch_resampling_iter_factory import (
+            EpochAwareSequenceIterFactory,
+        )
+
+        utt2category = read_2columns_text(utt2category_file)
+        category2utt: Dict[str, List[str]] = {}
+        for utt, lang in utt2category.items():
+            category2utt.setdefault(lang, []).append(utt)
+
+        utt2shape = load_num_sequence_text(
+            iter_options.shape_files[0], loader_type="csv_int"
+        )
+
+        # Same batch_bins budget any batch_type="length" config already uses
+        # (LengthBatchSampler) -- no heuristic derivation needed here.
+        logging.info(f"[train] chi_ibr batch_bins={iter_options.batch_bins}")
+
+        # Persist p_train (fixed for the whole run) next to the checkpoints,
+        # so validate_one_epoch's chi_ibr branch (trainer.py) can load it
+        # without needing to know about the data/dump directory layout.
+        #
+        # Duration-based, not utterance-count-based: average utterance
+        # length can vary a lot across languages/corpora (e.g. one corpus
+        # segmented into much shorter clips than another), so a count-based
+        # p_train would reflect segmentation granularity rather than how
+        # much real speech each language actually has. Two languages with
+        # equal total duration but very different utterance counts should
+        # get equal p_train, not proportional-to-count p_train.
+        group_durations = {
+            lang: sum(utt2shape[u][0] for u in utts)
+            for lang, utts in category2utt.items()
+        }
+        real_total = sum(group_durations.values())
+        p_train = {
+            lang: dur / real_total for lang, dur in group_durations.items()
+        }
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(p_train, output_dir / "chi_ibr_p_train.pth")
+        logging.info(f"[train] chi_ibr p_train={p_train}")
+
+        all_utts = set(itertools.chain.from_iterable(category2utt.values()))
+        dataset = cls.build_dataset(args, iter_options, all_utts)
+        logging.info(f"[train] dataset (chi_ibr):\n{dataset}")
+
+        return EpochAwareSequenceIterFactory(
+            dataset=dataset,
+            category2utt=category2utt,
+            utt2shape=utt2shape,
+            batch_bins=iter_options.batch_bins,
+            seed=args.seed,
+            max_scale_up=args.chi_ibr_conf.get("max_scale_up", 1.5),
+            num_workers=args.num_workers,
+            collate_fn=iter_options.collate_fn,
+            pin_memory=args.ngpu > 0,
         )
 
     @classmethod
