@@ -19,7 +19,7 @@ etc.) takes q as a plain input, agnostic to how it was produced.
 import logging
 import math
 import zlib
-from typing import Callable, Dict, List, Sequence
+from typing import Callable, Dict, List, Optional, Sequence
 
 import numpy as np
 from typeguard import typechecked
@@ -135,8 +135,10 @@ def solve_q(
     Args:
         p_train: fixed natural per-language data proportions, summing to 1.
         v: per-language value being maximized against (L_hat_g - b_g in the
-            paper -- e.g. validation CTC loss minus baseline; baselines are
-            not yet wired in here, so callers may pass v = L_hat directly).
+            paper -- e.g. validation CTC loss minus baseline). Baseline
+            subtraction happens upstream of this function, in trainer.py's
+            chi_ibr branch (chi_ibr_conf.baseline); callers with no baseline
+            configured pass v = L_hat directly.
         rho: radius of the chi-square ball around p_train.
         min_prob: floor on q_g / p_train_g, so no language is ever fully
             excluded from sampling.
@@ -146,8 +148,8 @@ def solve_q(
 
     Note: unlike the fairseq reference, this does not special-case "every
     language already beats its baseline" (there, `update_mw` falls back to
-    un-baselined losses in that situation) -- not yet relevant since no
-    baseline subtraction happens upstream of this function yet.
+    un-baselined losses in that situation) -- callers wanting that fallback
+    must implement it themselves before calling solve_q.
     """
     groups = list(p_train.keys())
     if set(v.keys()) != set(groups):
@@ -177,6 +179,43 @@ def solve_q(
 
     eta_star = _bisect(bisection_target, eta_min, eta_max)
     return _q_of_eta(eta_star, p_train, v, min_prob)
+
+
+@typechecked
+def q_from_temperature(
+    p_train: Dict[str, float], tau: Optional[float] = None
+) -> Dict[str, float]:
+    """Temperature-sampling target distribution, static (no L_hat/rho involved).
+
+    q_tau,i = p_train_i^(1/tau) / sum_j p_train_j^(1/tau) -- the standard
+    multilingual temperature-sampling formula (e.g. mBART/XLM-R), with the
+    usual |D_i| replaced by p_train_i (equivalent up to renormalization,
+    since p_train_i already is |D_i| / sum_j |D_j|).
+
+    tau=1 reproduces p_train exactly (natural proportions). tau=None is the
+    tau->infinity limit (uniform: 1/N per language), handled directly rather
+    than raising a ZeroDivisionError on 1/tau. Smaller tau concentrates more
+    mass on the largest languages; tau<=0 is undefined (the natural
+    generalization of "tau->0" is total concentration on the argmax, but
+    that's a limit, not a value tau can take) and rejected.
+
+    Unlike solve_q, this does not depend on any validation metric -- q is a
+    fixed function of p_train and tau, so callers only need to compute it
+    once (typically right after warmup_epochs).
+    """
+    if abs(sum(p_train.values()) - 1.0) > 1e-6:
+        raise ValueError("p_train must sum to 1")
+    if tau is None:
+        n = len(p_train)
+        return {g: 1.0 / n for g in p_train}
+    if tau <= 0:
+        raise ValueError(
+            f"tau must be positive, or None for the tau->infinity (uniform) "
+            f"limit; got {tau}"
+        )
+    scaled = {g: p_train[g] ** (1.0 / tau) for g in p_train}
+    total = sum(scaled.values())
+    return {g: scaled[g] / total for g in p_train}
 
 
 @typechecked

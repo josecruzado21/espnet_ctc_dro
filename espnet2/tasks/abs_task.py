@@ -760,8 +760,11 @@ class AbsTask(ABC):
             type=str_or_none,
             default=None,
             help="Metric used to update DRO group weights: 'cer', 'ctc', "
-            "'ctc_normalized', 'ctc_normalized_time', or None (None keeps "
-            "uniform weights)",
+            "'ctc_normalized', 'ctc_normalized_time', 'chi_ibr', 'temperature', "
+            "or None (None keeps uniform weights). 'chi_ibr' and 'temperature' "
+            "both use chi_ibr_conf.activate's per-epoch resampling pipeline "
+            "(EpochAwareSequenceIterFactory); 'temperature' is a static "
+            "(non-adaptive) alternative to 'chi_ibr' -- see chi_ibr_conf.tau.",
         )
         group.add_argument(
             "--dro_step_size",
@@ -784,18 +787,30 @@ class AbsTask(ABC):
                 min_prob=0.2,
                 max_scale_up=1.5,
                 metric_for_update="ctc",
+                tau=None,
+                baseline=None,
             ),
-            help="chi-IBR (chi-square Iterated Best Response) resampling config. "
-            "activate: whether to use chi-IBR per-epoch resampling instead of "
-            "static batching. rho: radius of the chi-square uncertainty ball "
-            "around p_train. min_prob: floor on q_g / p_train_g so no language "
-            "is ever fully excluded from an epoch. max_scale_up: cap on the "
+            help="Per-epoch resampling config, shared by both the 'chi_ibr' and "
+            "'temperature' top-level --metric_for_update mechanisms (name is "
+            "legacy from chi-IBR being the first user). activate: whether to "
+            "use per-epoch resampling instead of static batching. rho: radius "
+            "of the chi-square uncertainty ball around p_train (chi_ibr only). "
+            "min_prob: floor on q_g / p_train_g so no language is ever fully "
+            "excluded from an epoch (chi_ibr only). max_scale_up: cap on the "
             "resampled epoch's virtual size, as a multiple of the real total "
-            "dataset size. metric_for_update: 'ctc' or 'cer' -- which "
-            "per-language loss metric is L_hat_g (the paper's L_i) driving the "
-            "q-update. This is unrelated to the top-level --metric_for_update "
-            "above, which selects between the other (non-chi-IBR) DRO "
-            "mechanisms.",
+            "dataset size (shared by both mechanisms). metric_for_update: 'ctc', "
+            "'cer', or 'ctc_normalized' -- which per-language loss metric is "
+            "L_hat_g (the paper's L_i) driving the chi-IBR q-update (chi_ibr "
+            "only; unrelated to the top-level --metric_for_update, which "
+            "selects the DRO mechanism itself). tau: temperature-sampling only "
+            "-- q_g propto "
+            "p_train_g^(1/tau); None means tau=infinity (uniform weights); "
+            "1.0 reproduces p_train exactly. baseline: chi_ibr only -- optional "
+            "per-language dict of b_g (the paper's b_i), subtracted from "
+            "L_hat_g before the q-update (q maximizes q . (L_hat - b) instead "
+            "of q . L_hat); must cover every training language if set, e.g. "
+            "--chi_ibr_conf baseline.eng=12.3 --chi_ibr_conf baseline.deu=15.1; "
+            "None/unset keeps the un-baselined behavior (v = L_hat).",
         )
 
         group = parser.add_argument_group("Pretraining model related")
